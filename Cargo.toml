@@ -1,0 +1,20 @@
+[package]
+name = "rapier-viewport-plugin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rapier 3D physics plugin for viewport-lib"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+viewport-lib = { path = "../viewport-lib" }
+rapier3d = { version = "0.32", features = ["default"] }
+parry3d = "0.26"
+glam = { version = "=0.30.10", features = ["bytemuck"] }
+
+[dev-dependencies]
+eframe = { version = "=0.33.3", default-features = false, features = ["wgpu", "default_fonts"] }
+
+[[example]]
+name = "falling_stack"
+path = "examples/falling_stack.rs"
