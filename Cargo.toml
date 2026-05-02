@@ -18,3 +18,11 @@ eframe = { version = "=0.33.3", default-features = false, features = ["wgpu", "d
 [[example]]
 name = "falling_stack"
 path = "examples/falling_stack.rs"
+
+[[example]]
+name = "bouncing_spheres"
+path = "examples/bouncing_spheres.rs"
+
+[[example]]
+name = "kinematic_pusher"
+path = "examples/kinematic_pusher.rs"
