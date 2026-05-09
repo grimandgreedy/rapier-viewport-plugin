@@ -9,6 +9,7 @@ use crate::body::RapierBodyDesc;
 use crate::convert::{mat4_to_pose, pose_to_affine};
 use crate::error::RapierError;
 use crate::events::{EventCollector, RapierContactEvent};
+use crate::queries::{RapierRaycastHit, RapierShapeCastHit};
 use crate::state::RapierState;
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,186 @@ impl RapierPlugin {
         let state = self.state.lock().unwrap();
         let handle = state.node_to_body.get(&node_id).copied()?;
         Some(state.bodies.get(handle)?.angvel())
+    }
+
+    // ------------------------------------------------------------------
+    // Spatial queries
+    // ------------------------------------------------------------------
+
+    /// Cast a ray and return the nearest hit within `max_distance`, if any.
+    ///
+    /// `direction` does not need to be unit length: the returned `distance` is
+    /// always in world units along `direction.normalize()`.
+    pub fn raycast(
+        &self,
+        origin: glam::Vec3,
+        direction: glam::Vec3,
+        max_distance: f32,
+    ) -> Option<RapierRaycastHit> {
+        self.raycast_filtered(origin, direction, max_distance, &[])
+    }
+
+    /// Like [`raycast`](Self::raycast) but ignores any collider attached to a
+    /// node in `exclude`.
+    pub fn raycast_excluding(
+        &self,
+        origin: glam::Vec3,
+        direction: glam::Vec3,
+        max_distance: f32,
+        exclude: &[viewport_lib::NodeId],
+    ) -> Option<RapierRaycastHit> {
+        self.raycast_filtered(origin, direction, max_distance, exclude)
+    }
+
+    /// Cast a ray and return every collider along its path, sorted by distance.
+    pub fn raycast_all(
+        &self,
+        origin: glam::Vec3,
+        direction: glam::Vec3,
+        max_distance: f32,
+    ) -> Vec<RapierRaycastHit> {
+        use parry3d::query::Ray;
+
+        let state = self.state.lock().unwrap();
+        let dir = direction.normalize_or_zero();
+        if dir == glam::Vec3::ZERO {
+            return Vec::new();
+        }
+        let ray = Ray::new(origin, dir);
+        let query_pipeline = state.broad_phase.as_query_pipeline(
+            state.narrow_phase.query_dispatcher(),
+            &state.bodies,
+            &state.colliders,
+            rapier3d::pipeline::QueryFilter::default(),
+        );
+
+        let mut hits: Vec<RapierRaycastHit> = query_pipeline
+            .intersect_ray(ray, max_distance, true)
+            .filter_map(|(handle, _collider, intersection)| {
+                let node = state.node_for_collider(handle)?;
+                Some(RapierRaycastHit {
+                    node,
+                    distance: intersection.time_of_impact,
+                    point: origin + dir * intersection.time_of_impact,
+                    normal: intersection.normal,
+                })
+            })
+            .collect();
+        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        hits
+    }
+
+    /// Sweep a sphere from `start` along `direction` for up to `max_distance`
+    /// and return the nearest hit, if any.
+    pub fn cast_sphere(
+        &self,
+        start: glam::Vec3,
+        radius: f32,
+        direction: glam::Vec3,
+        max_distance: f32,
+    ) -> Option<RapierShapeCastHit> {
+        use parry3d::query::ShapeCastOptions;
+        use parry3d::shape::Ball;
+        use rapier3d::math::Pose;
+
+        let state = self.state.lock().unwrap();
+        let dir = direction.normalize_or_zero();
+        if dir == glam::Vec3::ZERO {
+            return None;
+        }
+        let shape = Ball::new(radius);
+        let pose = Pose { rotation: glam::Quat::IDENTITY, translation: start };
+        let velocity = dir;
+        let options = ShapeCastOptions {
+            max_time_of_impact: max_distance,
+            ..Default::default()
+        };
+        let query_pipeline = state.broad_phase.as_query_pipeline(
+            state.narrow_phase.query_dispatcher(),
+            &state.bodies,
+            &state.colliders,
+            rapier3d::pipeline::QueryFilter::default(),
+        );
+        let (handle, hit) = query_pipeline.cast_shape(&pose, velocity, &shape, options)?;
+        let node = state.node_for_collider(handle)?;
+        Some(RapierShapeCastHit {
+            node,
+            time_of_impact: hit.time_of_impact,
+            point: hit.witness1,
+            normal: hit.normal1,
+        })
+    }
+
+    /// Return every node whose collider overlaps a sphere at `center` with
+    /// the given `radius`.
+    pub fn overlap_sphere(
+        &self,
+        center: glam::Vec3,
+        radius: f32,
+    ) -> Vec<viewport_lib::NodeId> {
+        use parry3d::shape::Ball;
+        use rapier3d::math::Pose;
+
+        let state = self.state.lock().unwrap();
+        let shape = Ball::new(radius);
+        let pose = Pose { rotation: glam::Quat::IDENTITY, translation: center };
+        let query_pipeline = state.broad_phase.as_query_pipeline(
+            state.narrow_phase.query_dispatcher(),
+            &state.bodies,
+            &state.colliders,
+            rapier3d::pipeline::QueryFilter::default(),
+        );
+        query_pipeline
+            .intersect_shape(pose, &shape)
+            .filter_map(|(handle, _collider)| state.node_for_collider(handle))
+            .collect()
+    }
+
+    fn raycast_filtered(
+        &self,
+        origin: glam::Vec3,
+        direction: glam::Vec3,
+        max_distance: f32,
+        exclude: &[viewport_lib::NodeId],
+    ) -> Option<RapierRaycastHit> {
+        use parry3d::query::Ray;
+
+        let state = self.state.lock().unwrap();
+        let dir = direction.normalize_or_zero();
+        if dir == glam::Vec3::ZERO {
+            return None;
+        }
+
+        // Materialise the exclusion list as collider handles so the predicate
+        // closure does not need to take a lock or re-walk the maps per call.
+        let excluded: Vec<rapier3d::geometry::ColliderHandle> = exclude
+            .iter()
+            .filter_map(|id| state.node_to_collider.get(id).copied())
+            .collect();
+        let predicate = move |handle: rapier3d::geometry::ColliderHandle,
+                              _collider: &rapier3d::geometry::Collider|
+              -> bool { !excluded.contains(&handle) };
+
+        let filter = rapier3d::pipeline::QueryFilter {
+            predicate: Some(&predicate),
+            ..Default::default()
+        };
+        let query_pipeline = state.broad_phase.as_query_pipeline(
+            state.narrow_phase.query_dispatcher(),
+            &state.bodies,
+            &state.colliders,
+            filter,
+        );
+        let ray = Ray::new(origin, dir);
+        let (handle, intersection) =
+            query_pipeline.cast_ray_and_get_normal(&ray, max_distance, true)?;
+        let node = state.node_for_collider(handle)?;
+        Some(RapierRaycastHit {
+            node,
+            distance: intersection.time_of_impact,
+            point: origin + dir * intersection.time_of_impact,
+            normal: intersection.normal,
+        })
     }
 
     // ------------------------------------------------------------------

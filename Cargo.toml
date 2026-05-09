@@ -26,3 +26,7 @@ path = "examples/bouncing_spheres.rs"
 [[example]]
 name = "kinematic_pusher"
 path = "examples/kinematic_pusher.rs"
+
+[[example]]
+name = "ray_probe"
+path = "examples/ray_probe.rs"

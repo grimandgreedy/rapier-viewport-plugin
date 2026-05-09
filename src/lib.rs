@@ -58,9 +58,11 @@ pub mod convert;
 pub mod error;
 pub mod events;
 pub mod plugin;
+pub mod queries;
 pub(crate) mod state;
 
 pub use body::{RapierBodyDesc, RapierBodyKind, RapierColliderShape};
 pub use error::RapierError;
 pub use events::RapierContactEvent;
 pub use plugin::{RapierPlugin, RapierPreparePlugin, RapierSimulatePlugin};
+pub use queries::{RapierRaycastHit, RapierShapeCastHit};
