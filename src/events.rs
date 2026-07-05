@@ -32,7 +32,14 @@ impl EventHandler for EventCollector {
         event: CollisionEvent,
         _contact_pair: Option<&ContactPair>,
     ) {
-        self.collisions.lock().unwrap().push(event);
+        // Match the plugin-wide poison policy: recover transparently. The
+        // buffer is a plain `Vec<CollisionEvent>` with no invariant that a
+        // panicking earlier push could violate.
+        let mut buf = self
+            .collisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        buf.push(event);
     }
 
     fn handle_contact_force_event(

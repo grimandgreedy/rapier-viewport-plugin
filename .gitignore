@@ -1,2 +1,22 @@
+# Build output
 /target
-Cargo.lock
+
+# Cargo lockfile: omitted for library crates.
+/Cargo.lock
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+.direnv/
+*.swp
+*.swo
+*.log
+
+# Local Claude Code config
+CLAUDE.md
+.claude/
+settings.local.json
+
+# Local-only docs, not published
+docs/

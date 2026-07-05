@@ -1,16 +1,25 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use rapier3d::geometry::CollisionEvent;
+use rapier3d::dynamics::{RigidBody, RigidBodyHandle};
+use rapier3d::geometry::{Collider, ColliderHandle, CollisionEvent};
 use rapier3d::math::Vector;
 use viewport_lib::runtime::plugin::phase;
-use viewport_lib::{NodeId, RuntimePlugin, RuntimeStepContext, Scene};
+use viewport_lib::{NodeId, RuntimePlugin, RuntimeStepContext};
 
-use crate::body::RapierBodyDesc;
-use crate::convert::{mat4_to_pose, pose_to_affine};
-use crate::error::RapierError;
 use crate::events::{EventCollector, RapierContactEvent};
-use crate::queries::{RapierRaycastHit, RapierShapeCastHit};
 use crate::state::RapierState;
+
+/// Acquire the state mutex, transparently recovering from poisoning.
+///
+/// A poisoned mutex means a previous holder panicked. `RapierState` is
+/// plain Rust values (rapier's sets, two `IndexMap`s, integration params,
+/// etc.) with no unsafe interior mutation, so taking the underlying state
+/// and continuing is safer in practice than cascading the panic into
+/// every future plugin call.
+#[inline]
+fn lock_state(state: &Mutex<RapierState>) -> MutexGuard<'_, RapierState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ---------------------------------------------------------------------------
 // RapierPlugin: user-facing handle
@@ -23,35 +32,43 @@ use crate::state::RapierState;
 /// handle is cheap.
 ///
 /// All methods on this handle take the state mutex. They block while the
-/// simulate plugin is running, which matters if you ever drive the runtime from
-/// a worker thread: keep handle calls off the hot path or batch them between
-/// frames.
+/// simulate plugin is running; keep handle calls off the hot path or batch
+/// them between frames.
+///
+/// **Mutex poisoning:** if a previous holder of the lock panicked (most
+/// commonly: a closure passed to `with_body_mut` / `with_state_mut`
+/// panicked), every subsequent lock acquisition transparently recovers
+/// the underlying state and continues. The plugin never panics on a
+/// poisoned mutex.
 ///
 /// # Usage
 ///
 /// ```rust,ignore
+/// use rapier_viewport_plugin::{RapierPlugin, rapier3d::prelude::*};
+///
 /// let mut rapier = RapierPlugin::new();
-/// rapier.add_body_at(
-///     RapierBodyDesc::fixed(floor_id, RapierColliderShape::HalfSpace {
-///         outward_normal: glam::Vec3::Z,
-///     }),
-///     glam::Vec3::ZERO,
-///     glam::Quat::IDENTITY,
-/// )?;
+///
+/// // Build bodies and colliders using rapier's own builders.
+/// let floor_body = RigidBodyBuilder::fixed().build();
+/// let floor_collider = ColliderBuilder::halfspace(Vector::z_axis()).build();
+/// rapier.add_body(floor_id, floor_body, floor_collider);
+///
+/// let box_body = RigidBodyBuilder::dynamic()
+///     .translation(glam::Vec3::new(0.0, 0.0, 5.0))
+///     .build();
+/// let box_collider = ColliderBuilder::cuboid(0.5, 0.5, 0.5)
+///     .restitution(0.4)
+///     .active_events(ActiveEvents::COLLISION_EVENTS)
+///     .build();
+/// rapier.add_body(box_id, box_body, box_collider);
 ///
 /// let (prepare, simulate) = rapier.clone().into_plugins();
-/// let runtime = ViewportRuntime::new()
-///     .with_fixed_timestep(FixedTimestep::new(120.0))
-///     .with_plugin(prepare)
-///     .with_plugin(simulate);
 /// ```
 ///
-/// After each frame, read [`RapierContactEvent`]s from `output.events`:
-/// ```rust,ignore
-/// for ev in output.events.drain::<RapierContactEvent>() {
-///     println!("contact: {:?} <-> {:?} started={}", ev.node_a, ev.node_b, ev.started);
-/// }
-/// ```
+/// For anything not in the curated API (joints, locked axes, sensor flags,
+/// collision groups, the query pipeline, etc.) use the escape hatches:
+/// [`with_body_mut`](Self::with_body_mut), [`with_collider_mut`](Self::with_collider_mut),
+/// [`with_state_mut`](Self::with_state_mut), and [`with_state`](Self::with_state).
 #[derive(Clone)]
 pub struct RapierPlugin {
     state: Arc<Mutex<RapierState>>,
@@ -72,336 +89,104 @@ impl RapierPlugin {
     }
 
     pub fn with_gravity(self, g: glam::Vec3) -> Self {
-        self.state.lock().unwrap().gravity = g;
+        lock_state(&self.state).gravity = g;
         self
     }
 
     // ------------------------------------------------------------------
-    // Body management
+    // Body lifecycle
     // ------------------------------------------------------------------
 
-    /// Register a body at a specific world-space position and orientation.
+    /// Register a body and its collider, binding both to a scene node.
     ///
-    /// Returns an error if the body's collider shape is malformed (degenerate
-    /// convex hull or trimesh). Other shapes are infallible.
-    pub fn add_body_at(
-        &mut self,
-        desc: RapierBodyDesc,
-        position: glam::Vec3,
-        rotation: glam::Quat,
-    ) -> Result<(), RapierError> {
-        let transform = glam::Affine3A::from_rotation_translation(rotation, position);
-        self.state.lock().unwrap().add_body(&desc, transform)
+    /// Construct `body` and `collider` with rapier's `RigidBodyBuilder` and
+    /// `ColliderBuilder`. Initial transform, mass, restitution, friction,
+    /// collision groups, sensor flag, CCD, locked axes, and every other
+    /// rapier property are set on the builders.
+    pub fn add_body(&mut self, node_id: NodeId, body: RigidBody, collider: Collider) {
+        lock_state(&self.state).add_body(node_id, body, collider);
     }
 
-    /// Register a body using the world transform of the scene node it is bound
-    /// to. The node must already exist in the scene; if it does not, the body
-    /// is registered at the origin.
-    pub fn add_body_from_scene(
-        &mut self,
-        desc: RapierBodyDesc,
-        scene: &Scene,
-    ) -> Result<(), RapierError> {
-        let transform = scene
-            .node(desc.node_id)
-            .map(|n| glam::Affine3A::from_mat4(n.world_transform()))
-            .unwrap_or(glam::Affine3A::IDENTITY);
-        self.state.lock().unwrap().add_body(&desc, transform)
-    }
-
-    /// Remove a body from the simulation. No-op if the node was never registered.
+    /// Remove the body bound to `node_id`. No-op if the node was never registered.
     pub fn remove_body(&mut self, node_id: NodeId) {
-        self.state.lock().unwrap().remove_body(node_id);
+        lock_state(&self.state).remove_body(node_id);
     }
 
-    /// Remove every body and collider from the simulation.
+    /// Remove every registered body and collider.
     pub fn clear_bodies(&mut self) {
-        self.state.lock().unwrap().clear_bodies();
+        lock_state(&self.state).clear_bodies();
     }
 
     // ------------------------------------------------------------------
-    // Runtime mutations
+    // Handle accessors + escape hatches
     // ------------------------------------------------------------------
 
-    /// Apply a world-space linear impulse to a dynamic body.
-    pub fn apply_impulse(&mut self, node_id: NodeId, impulse: glam::Vec3) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(&handle) = state.node_to_body.get(&node_id) {
-            if let Some(body) = state.bodies.get_mut(handle) {
-                body.apply_impulse(impulse, true);
-            }
-        }
+    /// Look up the rapier [`RigidBodyHandle`] for a registered body.
+    pub fn body_handle(&self, node_id: NodeId) -> Option<RigidBodyHandle> {
+        lock_state(&self.state).node_to_body.get(&node_id).copied()
     }
 
-    /// Apply a world-space angular impulse to a dynamic body.
-    pub fn apply_angular_impulse(&mut self, node_id: NodeId, torque_impulse: glam::Vec3) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(&handle) = state.node_to_body.get(&node_id) {
-            if let Some(body) = state.bodies.get_mut(handle) {
-                body.apply_torque_impulse(torque_impulse, true);
-            }
-        }
+    /// Look up the rapier [`ColliderHandle`] for a registered body.
+    pub fn collider_handle(&self, node_id: NodeId) -> Option<ColliderHandle> {
+        lock_state(&self.state).node_to_collider.get(&node_id).copied()
     }
 
-    /// Set the linear velocity of a dynamic body directly.
-    pub fn set_linear_velocity(&mut self, node_id: NodeId, vel: glam::Vec3) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(&handle) = state.node_to_body.get(&node_id) {
-            if let Some(body) = state.bodies.get_mut(handle) {
-                body.set_linvel(vel, true);
-            }
-        }
-    }
-
-    /// Set the angular velocity of a dynamic body directly.
-    pub fn set_angular_velocity(&mut self, node_id: NodeId, ang_vel: glam::Vec3) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(&handle) = state.node_to_body.get(&node_id) {
-            if let Some(body) = state.bodies.get_mut(handle) {
-                body.set_angvel(ang_vel, true);
-            }
-        }
-    }
-
-    /// Wake a sleeping body.
-    pub fn wake_up(&mut self, node_id: NodeId) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(&handle) = state.node_to_body.get(&node_id) {
-            if let Some(body) = state.bodies.get_mut(handle) {
-                body.wake_up(true);
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Runtime queries
-    // ------------------------------------------------------------------
-
-    /// World-space position of a body.
-    pub fn position(&self, node_id: NodeId) -> Option<glam::Vec3> {
-        let state = self.state.lock().unwrap();
-        let handle = state.node_to_body.get(&node_id).copied()?;
-        Some(state.bodies.get(handle)?.position().translation)
-    }
-
-    /// World-space orientation of a body.
-    pub fn rotation(&self, node_id: NodeId) -> Option<glam::Quat> {
-        let state = self.state.lock().unwrap();
-        let handle = state.node_to_body.get(&node_id).copied()?;
-        Some(state.bodies.get(handle)?.position().rotation)
-    }
-
-    /// World-space position and orientation of a body.
-    pub fn body_transform(&self, node_id: NodeId) -> Option<(glam::Vec3, glam::Quat)> {
-        let state = self.state.lock().unwrap();
-        let handle = state.node_to_body.get(&node_id).copied()?;
-        let body = state.bodies.get(handle)?;
-        let pose = body.position();
-        Some((pose.translation, pose.rotation))
-    }
-
-    /// Current linear velocity of a body.
-    pub fn linear_velocity(&self, node_id: NodeId) -> Option<glam::Vec3> {
-        let state = self.state.lock().unwrap();
-        let handle = state.node_to_body.get(&node_id).copied()?;
-        Some(state.bodies.get(handle)?.linvel())
-    }
-
-    /// Current angular velocity of a body (rad/s, axis-angle in world space).
-    pub fn angular_velocity(&self, node_id: NodeId) -> Option<glam::Vec3> {
-        let state = self.state.lock().unwrap();
-        let handle = state.node_to_body.get(&node_id).copied()?;
-        Some(state.bodies.get(handle)?.angvel())
-    }
-
-    // ------------------------------------------------------------------
-    // Spatial queries
-    // ------------------------------------------------------------------
-
-    /// Cast a ray and return the nearest hit within `max_distance`, if any.
+    /// Run a closure with mutable access to a registered body's [`RigidBody`].
+    /// Returns `None` if the node has no body.
     ///
-    /// `direction` does not need to be unit length: the returned `distance` is
-    /// always in world units along `direction.normalize()`.
-    pub fn raycast(
-        &self,
-        origin: glam::Vec3,
-        direction: glam::Vec3,
-        max_distance: f32,
-    ) -> Option<RapierRaycastHit> {
-        self.raycast_filtered(origin, direction, max_distance, &[])
+    /// ```rust,ignore
+    /// plugin.with_body_mut(id, |b| {
+    ///     b.apply_impulse(glam::Vec3::Z * 5.0, true);
+    ///     b.lock_translations(true, true);
+    /// });
+    /// ```
+    pub fn with_body_mut<R>(
+        &mut self,
+        node_id: NodeId,
+        f: impl FnOnce(&mut RigidBody) -> R,
+    ) -> Option<R> {
+        let mut state = lock_state(&self.state);
+        let handle = state.node_to_body.get(&node_id).copied()?;
+        let body = state.bodies.get_mut(handle)?;
+        Some(f(body))
     }
 
-    /// Like [`raycast`](Self::raycast) but ignores any collider attached to a
-    /// node in `exclude`.
-    pub fn raycast_excluding(
-        &self,
-        origin: glam::Vec3,
-        direction: glam::Vec3,
-        max_distance: f32,
-        exclude: &[viewport_lib::NodeId],
-    ) -> Option<RapierRaycastHit> {
-        self.raycast_filtered(origin, direction, max_distance, exclude)
+    /// Run a closure with mutable access to a registered body's [`Collider`].
+    /// Returns `None` if the node has no collider.
+    pub fn with_collider_mut<R>(
+        &mut self,
+        node_id: NodeId,
+        f: impl FnOnce(&mut Collider) -> R,
+    ) -> Option<R> {
+        let mut state = lock_state(&self.state);
+        let handle = state.node_to_collider.get(&node_id).copied()?;
+        let collider = state.colliders.get_mut(handle)?;
+        Some(f(collider))
     }
 
-    /// Cast a ray and return every collider along its path, sorted by distance.
-    pub fn raycast_all(
-        &self,
-        origin: glam::Vec3,
-        direction: glam::Vec3,
-        max_distance: f32,
-    ) -> Vec<RapierRaycastHit> {
-        use parry3d::query::Ray;
-
-        let state = self.state.lock().unwrap();
-        let dir = direction.normalize_or_zero();
-        if dir == glam::Vec3::ZERO {
-            return Vec::new();
-        }
-        let ray = Ray::new(origin, dir);
-        let query_pipeline = state.broad_phase.as_query_pipeline(
-            state.narrow_phase.query_dispatcher(),
-            &state.bodies,
-            &state.colliders,
-            rapier3d::pipeline::QueryFilter::default(),
-        );
-
-        let mut hits: Vec<RapierRaycastHit> = query_pipeline
-            .intersect_ray(ray, max_distance, true)
-            .filter_map(|(handle, _collider, intersection)| {
-                let node = state.node_for_collider(handle)?;
-                Some(RapierRaycastHit {
-                    node,
-                    distance: intersection.time_of_impact,
-                    point: origin + dir * intersection.time_of_impact,
-                    normal: intersection.normal,
-                })
-            })
-            .collect();
-        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
-        hits
+    /// Run a closure with mutable access to the entire [`RapierState`]. Use
+    /// this for anything the curated API does not cover: joints, spatial
+    /// queries against the broad phase, character controllers, etc.
+    ///
+    /// Note: the internal mutex is held for the duration of `f`. Do not call
+    /// back into other [`RapierPlugin`] methods from inside the closure -- that
+    /// will deadlock.
+    pub fn with_state_mut<R>(&mut self, f: impl FnOnce(&mut RapierState) -> R) -> R {
+        f(&mut lock_state(&self.state))
     }
 
-    /// Sweep a sphere from `start` along `direction` for up to `max_distance`
-    /// and return the nearest hit, if any.
-    pub fn cast_sphere(
-        &self,
-        start: glam::Vec3,
-        radius: f32,
-        direction: glam::Vec3,
-        max_distance: f32,
-    ) -> Option<RapierShapeCastHit> {
-        use parry3d::query::ShapeCastOptions;
-        use parry3d::shape::Ball;
-        use rapier3d::math::Pose;
-
-        let state = self.state.lock().unwrap();
-        let dir = direction.normalize_or_zero();
-        if dir == glam::Vec3::ZERO {
-            return None;
-        }
-        let shape = Ball::new(radius);
-        let pose = Pose { rotation: glam::Quat::IDENTITY, translation: start };
-        let velocity = dir;
-        let options = ShapeCastOptions {
-            max_time_of_impact: max_distance,
-            ..Default::default()
-        };
-        let query_pipeline = state.broad_phase.as_query_pipeline(
-            state.narrow_phase.query_dispatcher(),
-            &state.bodies,
-            &state.colliders,
-            rapier3d::pipeline::QueryFilter::default(),
-        );
-        let (handle, hit) = query_pipeline.cast_shape(&pose, velocity, &shape, options)?;
-        let node = state.node_for_collider(handle)?;
-        Some(RapierShapeCastHit {
-            node,
-            time_of_impact: hit.time_of_impact,
-            point: hit.witness1,
-            normal: hit.normal1,
-        })
-    }
-
-    /// Return every node whose collider overlaps a sphere at `center` with
-    /// the given `radius`.
-    pub fn overlap_sphere(
-        &self,
-        center: glam::Vec3,
-        radius: f32,
-    ) -> Vec<viewport_lib::NodeId> {
-        use parry3d::shape::Ball;
-        use rapier3d::math::Pose;
-
-        let state = self.state.lock().unwrap();
-        let shape = Ball::new(radius);
-        let pose = Pose { rotation: glam::Quat::IDENTITY, translation: center };
-        let query_pipeline = state.broad_phase.as_query_pipeline(
-            state.narrow_phase.query_dispatcher(),
-            &state.bodies,
-            &state.colliders,
-            rapier3d::pipeline::QueryFilter::default(),
-        );
-        query_pipeline
-            .intersect_shape(pose, &shape)
-            .filter_map(|(handle, _collider)| state.node_for_collider(handle))
-            .collect()
-    }
-
-    fn raycast_filtered(
-        &self,
-        origin: glam::Vec3,
-        direction: glam::Vec3,
-        max_distance: f32,
-        exclude: &[viewport_lib::NodeId],
-    ) -> Option<RapierRaycastHit> {
-        use parry3d::query::Ray;
-
-        let state = self.state.lock().unwrap();
-        let dir = direction.normalize_or_zero();
-        if dir == glam::Vec3::ZERO {
-            return None;
-        }
-
-        // Materialise the exclusion list as collider handles so the predicate
-        // closure does not need to take a lock or re-walk the maps per call.
-        let excluded: Vec<rapier3d::geometry::ColliderHandle> = exclude
-            .iter()
-            .filter_map(|id| state.node_to_collider.get(id).copied())
-            .collect();
-        let predicate = move |handle: rapier3d::geometry::ColliderHandle,
-                              _collider: &rapier3d::geometry::Collider|
-              -> bool { !excluded.contains(&handle) };
-
-        let filter = rapier3d::pipeline::QueryFilter {
-            predicate: Some(&predicate),
-            ..Default::default()
-        };
-        let query_pipeline = state.broad_phase.as_query_pipeline(
-            state.narrow_phase.query_dispatcher(),
-            &state.bodies,
-            &state.colliders,
-            filter,
-        );
-        let ray = Ray::new(origin, dir);
-        let (handle, intersection) =
-            query_pipeline.cast_ray_and_get_normal(&ray, max_distance, true)?;
-        let node = state.node_for_collider(handle)?;
-        Some(RapierRaycastHit {
-            node,
-            distance: intersection.time_of_impact,
-            point: origin + dir * intersection.time_of_impact,
-            normal: intersection.normal,
-        })
+    /// Read-only counterpart to [`with_state_mut`](Self::with_state_mut).
+    pub fn with_state<R>(&self, f: impl FnOnce(&RapierState) -> R) -> R {
+        f(&lock_state(&self.state))
     }
 
     // ------------------------------------------------------------------
     // Plugin extraction
     // ------------------------------------------------------------------
 
-    /// Split into the two `RuntimePlugin` objects the runtime needs.
-    ///
-    /// Call after all bodies have been registered (or register bodies at runtime
-    /// through the clone of `self` you keep).
+    /// Split into the two `RuntimePlugin` objects the runtime needs. Bodies
+    /// can still be added or removed at runtime through the cloned handle
+    /// after this is called.
     pub fn into_plugins(self) -> (RapierPreparePlugin, RapierSimulatePlugin) {
         (
             RapierPreparePlugin {
@@ -415,7 +200,7 @@ impl RapierPlugin {
 }
 
 // ---------------------------------------------------------------------------
-// Prepare plugin: sync scene -> Rapier for fixed and kinematic bodies
+// Prepare plugin: sync scene -> rapier for fixed and kinematic bodies
 // ---------------------------------------------------------------------------
 
 pub struct RapierPreparePlugin {
@@ -428,11 +213,11 @@ impl RuntimePlugin for RapierPreparePlugin {
     }
 
     fn step(&mut self, ctx: &mut RuntimeStepContext<'_>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_state(&self.state);
 
-        // Snapshot the (node, handle, is_kinematic) triples up front so we can
-        // mutate bodies in the loop without aliasing the map.
-        let synced: Vec<(NodeId, rapier3d::dynamics::RigidBodyHandle, bool)> = state
+        // Snapshot (node, handle, is_kinematic) up front so we can mutate
+        // bodies in the loop without aliasing the map.
+        let synced: Vec<(NodeId, RigidBodyHandle, bool)> = state
             .node_to_body
             .iter()
             .filter_map(|(&node_id, &handle)| {
@@ -451,7 +236,9 @@ impl RuntimePlugin for RapierPreparePlugin {
             let Some(node) = ctx.scene.node(node_id) else {
                 continue;
             };
-            let pose = mat4_to_pose(node.world_transform());
+            let m = node.world_transform();
+            let (_, rotation, translation) = m.to_scale_rotation_translation();
+            let pose = rapier3d::math::Pose { rotation, translation };
             if let Some(body) = state.bodies.get_mut(handle) {
                 if is_kinematic {
                     body.set_next_kinematic_position(pose);
@@ -464,7 +251,7 @@ impl RuntimePlugin for RapierPreparePlugin {
 }
 
 // ---------------------------------------------------------------------------
-// Simulate plugin: step Rapier, write back dynamic body transforms
+// Simulate plugin: step rapier, write back dynamic body transforms
 // ---------------------------------------------------------------------------
 
 pub struct RapierSimulatePlugin {
@@ -478,15 +265,15 @@ impl RuntimePlugin for RapierSimulatePlugin {
 
     fn step(&mut self, ctx: &mut RuntimeStepContext<'_>) {
         let dt = ctx.dt;
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_state(&self.state);
 
         state.integration_params.dt = dt;
 
         let collector = EventCollector::default();
 
-        // Destructure to satisfy the borrow checker: pipeline.step needs &mut pipeline
-        // plus independent borrows of all other fields simultaneously.
-        let crate::state::RapierState {
+        // Destructure to satisfy the borrow checker: pipeline.step needs
+        // &mut pipeline plus independent borrows of every other field.
+        let RapierState {
             ref mut pipeline,
             ref gravity,
             ref integration_params,
@@ -516,14 +303,17 @@ impl RuntimePlugin for RapierSimulatePlugin {
             &collector,
         );
 
-        // Write dynamic body transforms back to viewport-lib scene.
+        // Write dynamic body transforms back to the scene.
         let dynamic_bodies: Vec<(NodeId, glam::Affine3A)> = state
             .node_to_body
             .iter()
             .filter_map(|(&node_id, &handle)| {
                 let body = state.bodies.get(handle)?;
                 if body.is_dynamic() {
-                    Some((node_id, pose_to_affine(body.position())))
+                    let pose = body.position();
+                    let transform =
+                        glam::Affine3A::from_rotation_translation(pose.rotation, pose.translation);
+                    Some((node_id, transform))
                 } else {
                     None
                 }
@@ -534,8 +324,11 @@ impl RuntimePlugin for RapierSimulatePlugin {
             ctx.writeback.set_preserve_scale(node_id, transform);
         }
 
-        // Translate raw collision events to NodeId-based events and emit them.
-        let collisions = collector.collisions.into_inner().unwrap();
+        // Translate raw collision events to NodeId-based events.
+        let collisions = collector
+            .collisions
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for event in collisions {
             let (h1, h2, started) = match event {
                 CollisionEvent::Started(h1, h2, _) => (h1, h2, true),

@@ -1,18 +1,33 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
-use rapier3d::dynamics::IntegrationParameters;
 use rapier3d::dynamics::{
-    CCDSolver, ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBodyHandle, RigidBodySet,
+    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, RigidBody,
+    RigidBodyHandle, RigidBodySet,
 };
-use rapier3d::geometry::{BroadPhaseBvh, ColliderHandle, ColliderSet, NarrowPhase};
+use rapier3d::geometry::{
+    BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, NarrowPhase,
+};
 use rapier3d::math::Vector;
 use rapier3d::pipeline::PhysicsPipeline;
 use viewport_lib::NodeId;
 
-use crate::body::{RapierBodyDesc, RapierBodyKind, RapierColliderShape};
-use crate::convert::affine_to_pose;
-use crate::error::RapierError;
-
+/// Shared world state: every rapier set the simulation needs, plus the
+/// `NodeId`-to-handle maps that keep scene identity in sync with rapier's
+/// handle namespace.
+///
+/// The four maps are [`IndexMap`]s (insertion-ordered) rather than
+/// [`HashMap`](std::collections::HashMap) so iteration order is the same
+/// on every run. The simulate plugin walks `node_to_body` to drive its
+/// writeback and event-translation passes, so this gives deterministic
+/// writeback and `RapierContactEvent` order within a single process.
+///
+/// For cross-platform floating-point determinism (different CPUs
+/// producing the same bits), enable rapier's `enhanced-determinism` Cargo
+/// feature on the `rapier3d` dependency. That is a compile-time feature,
+/// not a runtime switch.
+///
+/// Fields are public; reach in via [`crate::RapierPlugin::with_state_mut`]
+/// for anything not covered by the curated handle API.
 pub struct RapierState {
     pub integration_params: IntegrationParameters,
     pub pipeline: PhysicsPipeline,
@@ -26,10 +41,10 @@ pub struct RapierState {
     pub ccd_solver: CCDSolver,
     pub gravity: Vector,
 
-    pub node_to_body: HashMap<NodeId, RigidBodyHandle>,
-    pub body_to_node: HashMap<RigidBodyHandle, NodeId>,
-    pub node_to_collider: HashMap<NodeId, ColliderHandle>,
-    pub collider_to_node: HashMap<ColliderHandle, NodeId>,
+    pub node_to_body: IndexMap<NodeId, RigidBodyHandle>,
+    pub body_to_node: IndexMap<RigidBodyHandle, NodeId>,
+    pub node_to_collider: IndexMap<NodeId, ColliderHandle>,
+    pub collider_to_node: IndexMap<ColliderHandle, NodeId>,
 }
 
 impl RapierState {
@@ -46,72 +61,41 @@ impl RapierState {
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             gravity,
-            node_to_body: HashMap::new(),
-            body_to_node: HashMap::new(),
-            node_to_collider: HashMap::new(),
-            collider_to_node: HashMap::new(),
+            node_to_body: IndexMap::new(),
+            body_to_node: IndexMap::new(),
+            node_to_collider: IndexMap::new(),
+            collider_to_node: IndexMap::new(),
         }
     }
 
-    pub fn add_body(
-        &mut self,
-        desc: &RapierBodyDesc,
-        initial_transform: glam::Affine3A,
-    ) -> Result<(), RapierError> {
-        use rapier3d::dynamics::RigidBodyBuilder;
-        use rapier3d::pipeline::ActiveEvents;
-
-        // Build the collider first so we can fail without leaking a rigid body
-        // into the world.
-        let collider_builder = build_collider(&desc.shape)?
-            .restitution(desc.restitution)
-            .friction(desc.friction)
-            .density(desc.density);
-
-        let collider_builder = if desc.active_events {
-            collider_builder.active_events(ActiveEvents::COLLISION_EVENTS)
-        } else {
-            collider_builder
-        };
-
-        let pose = affine_to_pose(initial_transform);
-
-        let rb = match desc.kind {
-            RapierBodyKind::Dynamic => RigidBodyBuilder::dynamic()
-                .pose(pose)
-                .gravity_scale(desc.gravity_scale)
-                .linvel(desc.initial_linear_velocity)
-                .angvel(desc.initial_angular_velocity)
-                .ccd_enabled(desc.ccd_enabled)
-                .build(),
-            RapierBodyKind::Fixed => RigidBodyBuilder::fixed().pose(pose).build(),
-            RapierBodyKind::KinematicPosition => RigidBodyBuilder::kinematic_position_based()
-                .pose(pose)
-                .build(),
-        };
-
-        let body_handle = self.bodies.insert(rb);
-        let collider_handle = self.colliders.insert_with_parent(
-            collider_builder.build(),
-            body_handle,
-            &mut self.bodies,
-        );
-
-        self.node_to_body.insert(desc.node_id, body_handle);
-        self.body_to_node.insert(body_handle, desc.node_id);
-        self.node_to_collider.insert(desc.node_id, collider_handle);
-        self.collider_to_node.insert(collider_handle, desc.node_id);
-        Ok(())
+    /// Insert a rigid body + collider pair and bind them to a scene node. The
+    /// body and collider should already be configured (use rapier's
+    /// `RigidBodyBuilder` / `ColliderBuilder`).
+    pub fn add_body(&mut self, node_id: NodeId, body: RigidBody, collider: Collider) {
+        let body_handle = self.bodies.insert(body);
+        let collider_handle =
+            self.colliders
+                .insert_with_parent(collider, body_handle, &mut self.bodies);
+        self.node_to_body.insert(node_id, body_handle);
+        self.body_to_node.insert(body_handle, node_id);
+        self.node_to_collider.insert(node_id, collider_handle);
+        self.collider_to_node.insert(collider_handle, node_id);
     }
 
+    /// Remove the body bound to `node_id` (and its collider). No-op if the
+    /// node was never registered.
+    ///
+    /// Uses `shift_remove` on every map so the insertion order of the
+    /// remaining entries is preserved; this is what gives the simulate
+    /// plugin's writeback a deterministic order across runs.
     pub fn remove_body(&mut self, node_id: NodeId) {
-        let Some(body_handle) = self.node_to_body.remove(&node_id) else {
+        let Some(body_handle) = self.node_to_body.shift_remove(&node_id) else {
             return;
         };
-        self.body_to_node.remove(&body_handle);
+        self.body_to_node.shift_remove(&body_handle);
 
-        if let Some(collider_handle) = self.node_to_collider.remove(&node_id) {
-            self.collider_to_node.remove(&collider_handle);
+        if let Some(collider_handle) = self.node_to_collider.shift_remove(&node_id) {
+            self.collider_to_node.shift_remove(&collider_handle);
         }
 
         self.bodies.remove(
@@ -124,6 +108,7 @@ impl RapierState {
         );
     }
 
+    /// Remove every registered body.
     pub fn clear_bodies(&mut self) {
         let ids: Vec<NodeId> = self.node_to_body.keys().copied().collect();
         for id in ids {
@@ -131,37 +116,13 @@ impl RapierState {
         }
     }
 
-    /// Look up the `NodeId` for a given collider handle.
+    /// `NodeId` bound to a collider handle, if any.
     pub fn node_for_collider(&self, handle: ColliderHandle) -> Option<NodeId> {
         self.collider_to_node.get(&handle).copied()
     }
-}
 
-fn build_collider(
-    shape: &RapierColliderShape,
-) -> Result<rapier3d::geometry::ColliderBuilder, RapierError> {
-    use rapier3d::geometry::ColliderBuilder;
-
-    Ok(match shape {
-        RapierColliderShape::Ball { radius } => ColliderBuilder::ball(*radius),
-        RapierColliderShape::Cuboid { half_extents } => {
-            ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
-        }
-        RapierColliderShape::CapsuleZ {
-            half_height,
-            radius,
-        } => ColliderBuilder::capsule_z(*half_height, *radius),
-        RapierColliderShape::HalfSpace { outward_normal } => {
-            use parry3d::shape::HalfSpace;
-            use rapier3d::geometry::SharedShape;
-            ColliderBuilder::new(SharedShape::new(HalfSpace::new(outward_normal.normalize())))
-        }
-        RapierColliderShape::ConvexHull { points } => {
-            ColliderBuilder::convex_hull(points).ok_or(RapierError::InvalidConvexHull)?
-        }
-        RapierColliderShape::TriMesh { vertices, indices } => {
-            ColliderBuilder::trimesh(vertices.clone(), indices.clone())
-                .map_err(|_| RapierError::InvalidTriMesh)?
-        }
-    })
+    /// `NodeId` bound to a rigid body handle, if any.
+    pub fn node_for_body(&self, handle: RigidBodyHandle) -> Option<NodeId> {
+        self.body_to_node.get(&handle).copied()
+    }
 }
