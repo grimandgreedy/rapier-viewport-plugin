@@ -4,29 +4,24 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Rapier 3D physics plugin for viewport-lib"
-license = "MIT OR Apache-2.0"
+readme = "README.md"
+license = "GPL-3.0-only"
+repository = "https://github.com/grimandgreedy/rapier-viewport-plugin"
+homepage = "https://github.com/grimandgreedy/rapier-viewport-plugin"
+documentation = "https://docs.rs/rapier-viewport-plugin"
+keywords = ["physics", "rapier", "viewport", "viewport-lib", "3d"]
+categories = ["graphics", "simulation", "game-development"]
+publish = true
+exclude = ["examples/", "docs/", "LOG.md", "capability-coverage.md"]
 
 [dependencies]
-viewport-lib = { path = "../viewport-lib" }
+viewport-lib = { path = "../viewport-lib", version = "0.19" }
 rapier3d = { version = "0.32", features = ["default"] }
 parry3d = "0.26"
 glam = { version = "=0.30.10", features = ["bytemuck"] }
+indexmap = "2"
 
+# Examples are autodiscovered from examples/. They pull in eframe/wgpu and are
+# excluded from the published package to keep it lean; run them from the repo.
 [dev-dependencies]
 eframe = { version = "=0.33.3", default-features = false, features = ["wgpu", "default_fonts"] }
-
-[[example]]
-name = "falling_stack"
-path = "examples/falling_stack.rs"
-
-[[example]]
-name = "bouncing_spheres"
-path = "examples/bouncing_spheres.rs"
-
-[[example]]
-name = "kinematic_pusher"
-path = "examples/kinematic_pusher.rs"
-
-[[example]]
-name = "ray_probe"
-path = "examples/ray_probe.rs"
