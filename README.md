@@ -1,14 +1,14 @@
 # rapier-viewport-plugin
 
-[Rapier 3D][rapier] physics as a [viewport-lib][vp] runtime plugin.
-
 This is a small adapter crate. It does two things:
 
 1. Implements viewport-lib's `RuntimePlugin` trait so rapier runs inside a `ViewportRuntime` alongside any other plugin, on its fixed-timestep loop.
 2. Keeps a `NodeId <-> Handle` map so you address bodies by the same `viewport_lib::NodeId` you use for scene nodes everywhere else.
 
 Everything else is rapier, used directly through its own builders. The crate re-exports `rapier3d` and `parry3d` at the crate root so you don't manage those dependencies separately. It does not wrap the rapier API: you build bodies and colliders with rapier's `RigidBodyBuilder` / `ColliderBuilder` and reach the rest of rapier through the `with_*` methods below.
+
 [rapier]: https://github.com/dimforge/rapier
+
 [vp]: https://github.com/grimandgreedy/viewport-lib
 
 ## Using it
@@ -115,19 +115,6 @@ let hit_node = rapier.with_state(|s| {
 ```
 
 ## Examples
-
-Eight examples cover the things you'd typically wire up:
-
-| Example | What it shows |
-|---|---|
-| `falling_stack` | Dynamic bodies, gravity, a halfspace floor, transform writeback to the scene |
-| `bouncing_spheres` | Restitution, multiple simultaneous contacts, draining `RapierContactEvent`s from the runtime output |
-| `kinematic_pusher` | Driving a `KinematicPosition` body's transform from input each frame; rapier's implicit velocity pushes dynamic balls |
-| `ray_probe` | Camera-forward raycast through `with_state` and `BroadPhaseBvh::as_query_pipeline`. Click or space to mark the hit body |
-| `joint_chain` | A 5-link revolute-joint chain: `body_handle` to translate NodeIds, `with_state_mut` to insert into `ImpulseJointSet`, `with_body_mut` to apply impulses |
-| `sensor_trigger` | Trigger-volume detection: `ColliderBuilder::sensor(true)` for a ghost collider that emits events without contact forces |
-| `collision_groups` | Layer-based collision filtering with `InteractionGroups` (32-bit membership / filter bitmasks) |
-| `character_controller` | Keyboard-driven character using rapier's `KinematicCharacterController::move_shape(...)` through `with_state`. Walks around fixed box obstacles |
 
 Run any of them:
 
