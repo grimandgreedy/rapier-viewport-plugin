@@ -1,21 +1,33 @@
 //! A ray is cast from the camera straight ahead every frame. The body it
 //! hits is highlighted; click or press space to mark it permanently black.
 //!
-//! This is the kind of query you'd use for AI sight-lines, character
-//! grounding, or projectile pre-checks: the question is not "what did the
-//! user click on the screen" (use viewport-lib's pick API for that) but
-//! "what's in front of this body in the physics world".
+//! Demonstrates the **escape-hatch** pattern: the plugin's curated API does
+//! not include a raycast wrapper. Instead, `with_state` gives temporary
+//! immutable access to the underlying `RapierState`, where we construct a
+//! `QueryPipeline` via `BroadPhaseBvh::as_query_pipeline(...)` and call
+//! rapier's own `cast_ray_and_get_normal` directly. The hit collider is
+//! translated back to a `NodeId` through `state.node_for_collider(handle)`.
+//!
+//! For UI mouse-click selection use viewport-lib's pick API instead -- this
+//! is the pattern for game-logic raycasts (AI sight-lines, projectile
+//! pre-checks, character grounding).
 //!
 //! Controls: left-drag to orbit (aim the ray), left-click or space to
 //! blacken the aimed body, right-drag to pan, scroll to zoom.
 //!
-//! Run with:
-//!   cargo run --example ray_probe
+//! Run with: `cargo run --example ray_probe`
 
 use std::collections::HashSet;
 
 use eframe::egui;
-use rapier_viewport_plugin::{RapierBodyDesc, RapierColliderShape, RapierPlugin};
+use rapier_viewport_plugin::{
+    parry3d::{query::Ray, shape::SharedShape},
+    rapier3d::{
+        pipeline::QueryFilter,
+        prelude::{ColliderBuilder, RigidBodyBuilder},
+    },
+    RapierPlugin,
+};
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
     Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
@@ -146,17 +158,11 @@ impl App {
                 m
             },
         );
-        self.rapier
-            .add_body_from_scene(
-                RapierBodyDesc::fixed(
-                    self.floor_id,
-                    RapierColliderShape::HalfSpace {
-                        outward_normal: glam::Vec3::Z,
-                    },
-                ),
-                &self.scene,
-            )
-            .expect("floor");
+        self.rapier.add_body(
+            self.floor_id,
+            RigidBodyBuilder::fixed().build(),
+            ColliderBuilder::new(SharedShape::halfspace(glam::Vec3::Z)).build(),
+        );
 
         self.body_ids.clear();
         self.body_colours.clear();
@@ -189,15 +195,16 @@ impl App {
         for (i, &(x, y, is_box)) in grid.iter().enumerate() {
             let colour = palette[i % palette.len()];
             let pos = glam::Vec3::new(x, y, 0.6);
-            let (mesh, shape) = if is_box {
+            let (mesh, collider) = if is_box {
                 (
                     self.box_mesh,
-                    RapierColliderShape::Cuboid {
-                        half_extents: glam::Vec3::splat(0.5),
-                    },
+                    ColliderBuilder::cuboid(0.5, 0.5, 0.5).friction(0.7).build(),
                 )
             } else {
-                (self.sphere_mesh, RapierColliderShape::Ball { radius: 0.5 })
+                (
+                    self.sphere_mesh,
+                    ColliderBuilder::ball(0.5).friction(0.7).build(),
+                )
             };
 
             let id = self.scene.add(
@@ -205,13 +212,8 @@ impl App {
                 glam::Mat4::from_translation(pos),
                 Material::from_colour(colour),
             );
-            self.rapier
-                .add_body_at(
-                    RapierBodyDesc::dynamic(id, shape).with_friction(0.7),
-                    pos,
-                    glam::Quat::IDENTITY,
-                )
-                .expect("body");
+            let body = RigidBodyBuilder::dynamic().translation(pos).build();
+            self.rapier.add_body(id, body, collider);
             self.body_ids.push(id);
             self.body_colours.push(colour);
         }
@@ -230,20 +232,39 @@ impl App {
             self.aimed = None;
             return;
         }
-        // Exclude the floor so the ray, if it misses every body, doesn't latch
-        // onto the floor and confuse the demo.
-        let exclude = [self.floor_id];
-        match self.rapier.raycast_excluding(eye, dir, RAY_MAX_DISTANCE, &exclude) {
-            Some(hit) => {
-                self.aimed = Some(HitInfo {
-                    node: hit.node,
-                    point: hit.point,
-                    normal: hit.normal,
-                    distance: hit.distance,
-                });
-            }
-            None => self.aimed = None,
-        }
+
+        // Translate the floor NodeId to a rapier ColliderHandle *before*
+        // entering `with_state`, since `with_state` holds the mutex for the
+        // duration of the closure and calling another plugin method inside
+        // would deadlock.
+        let floor_collider = self.rapier.collider_handle(self.floor_id);
+
+        // The escape-hatch raycast. Three things happening here:
+        //   1. Build a QueryFilter that excludes the floor.
+        //   2. Borrow a transient QueryPipeline from the broad phase.
+        //   3. Cast, then translate the hit ColliderHandle back to a NodeId.
+        self.aimed = self.rapier.with_state(|s| {
+            let qp = s.broad_phase.as_query_pipeline(
+                s.narrow_phase.query_dispatcher(),
+                &s.bodies,
+                &s.colliders,
+                QueryFilter {
+                    exclude_collider: floor_collider,
+                    ..Default::default()
+                },
+            );
+            let ray = Ray::new(eye, dir);
+            qp.cast_ray_and_get_normal(&ray, RAY_MAX_DISTANCE, true)
+                .and_then(|(handle, hit)| {
+                    let node = s.node_for_collider(handle)?;
+                    Some(HitInfo {
+                        node,
+                        distance: hit.time_of_impact,
+                        point: eye + dir * hit.time_of_impact,
+                        normal: hit.normal,
+                    })
+                })
+        });
     }
 }
 

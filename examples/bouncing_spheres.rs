@@ -1,12 +1,17 @@
-//! Bouncing spheres inside a closed box. Balls launched in
-//! random directions ricochet off the walls.
+//! Bouncing spheres inside a closed box. Demonstrates contact events:
+//! colliders with `ActiveEvents::COLLISION_EVENTS` set produce
+//! `RapierContactEvent`s on the runtime output bus, which the app drains
+//! each frame and counts in the side panel.
 //!
-//! Run with:
-//!   cargo run --example bouncing_spheres
+//! Controls: left-drag to orbit, right-drag to pan, scroll to zoom.
+//!
+//! Run with: `cargo run --example bouncing_spheres`
 
 use eframe::egui;
 use rapier_viewport_plugin::{
-    RapierBodyDesc, RapierColliderShape, RapierContactEvent, RapierPlugin,
+    parry3d::shape::SharedShape,
+    rapier3d::prelude::{ActiveEvents, ColliderBuilder, RigidBodyBuilder},
+    RapierContactEvent, RapierPlugin,
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
@@ -58,8 +63,10 @@ const BALL_RADIUS: f32 = 0.45;
 const BALL_COUNT: usize = 8;
 const BOX_HALF: f32 = 5.0;
 const WALL_THICKNESS: f32 = 0.25;
-const WALL_HEIGHT: f32 = 2.5;
-const LAUNCH_SPEED: f32 = 6.0;
+// Half-extent: full wall height = 2 * WALL_HEIGHT, just enough to keep the
+// balls in.
+const WALL_HEIGHT: f32 = 0.6;
+const LAUNCH_SPEED: f32 = 13.0;
 
 // ---------------------------------------------------------------------------
 
@@ -135,17 +142,11 @@ impl App {
                 m
             },
         );
-        self.rapier
-            .add_body_from_scene(
-                RapierBodyDesc::fixed(
-                    self.floor_id,
-                    RapierColliderShape::HalfSpace {
-                        outward_normal: glam::Vec3::Z,
-                    },
-                ),
-                &self.scene,
-            )
-            .expect("floor halfspace");
+        self.rapier.add_body(
+            self.floor_id,
+            RigidBodyBuilder::fixed().build(),
+            ColliderBuilder::new(SharedShape::halfspace(glam::Vec3::Z)).build(),
+        );
 
         // Four walls forming a square arena around the origin. Each wall is a
         // thin cuboid placed at one edge of the box.
@@ -169,19 +170,14 @@ impl App {
                 glam::Mat4::from_rotation_translation(rot, pos),
                 wall_colour,
             );
-            self.rapier
-                .add_body_at(
-                    RapierBodyDesc::fixed(
-                        id,
-                        RapierColliderShape::Cuboid {
-                            half_extents: glam::Vec3::new(BOX_HALF, WALL_THICKNESS, WALL_HEIGHT),
-                        },
-                    )
-                    .with_restitution(0.9),
-                    pos,
-                    rot,
-                )
-                .expect("wall cuboid");
+            let body = RigidBodyBuilder::fixed()
+                .translation(pos)
+                .rotation(glam::Quat::to_scaled_axis(rot))
+                .build();
+            let collider = ColliderBuilder::cuboid(BOX_HALF, WALL_THICKNESS, WALL_HEIGHT)
+                .restitution(0.9)
+                .build();
+            self.rapier.add_body(id, body, collider);
             self.wall_ids.push(id);
         }
 
@@ -203,10 +199,12 @@ impl App {
             // the centre
             let angle = fi * std::f32::consts::TAU / BALL_COUNT as f32;
             let radius = BOX_HALF - 1.0;
+            // Spawn just above the floor, inside the wall height, with a
+            // bit of jitter so the balls don't all stack at the same Z.
             let pos = glam::Vec3::new(
                 angle.cos() * radius,
                 angle.sin() * radius,
-                BALL_RADIUS + 1.0 + (fi * 0.3).sin() * 0.5,
+                BALL_RADIUS + 0.05 + (fi * 0.3).sin().abs() * 0.2,
             );
             // Inward + a bit of swirl.
             let inward = -glam::Vec3::new(angle.cos(), angle.sin(), 0.0);
@@ -219,16 +217,18 @@ impl App {
                 glam::Mat4::from_translation(pos),
                 Material::from_colour(colour),
             );
-            let desc = RapierBodyDesc::dynamic(
-                id,
-                RapierColliderShape::Ball { radius: BALL_RADIUS },
-            )
-            .with_restitution(0.92)
-            .with_friction(0.1)
-            .with_initial_linear_velocity(vel);
-            self.rapier
-                .add_body_at(desc, pos, glam::Quat::IDENTITY)
-                .expect("ball");
+            // ActiveEvents::COLLISION_EVENTS on the collider is what makes
+            // this body emit `RapierContactEvent`s on the runtime output bus.
+            let body = RigidBodyBuilder::dynamic()
+                .translation(pos)
+                .linvel(vel)
+                .build();
+            let collider = ColliderBuilder::ball(BALL_RADIUS)
+                .restitution(0.92)
+                .friction(0.1)
+                .active_events(ActiveEvents::COLLISION_EVENTS)
+                .build();
+            self.rapier.add_body(id, body, collider);
             self.ball_ids.push(id);
         }
 
@@ -356,6 +356,9 @@ impl eframe::App for App {
                 self.runtime
                     .step(&mut self.scene, &mut self.selection, &frame_ctx);
 
+            // Contact events for this step. Both colliders need
+            // `ActiveEvents::COLLISION_EVENTS` for an event to fire;
+            // see how the ball/wall colliders are built in `reset()`.
             for ev in output.events.drain::<RapierContactEvent>() {
                 if ev.started {
                     self.contact_started += 1;

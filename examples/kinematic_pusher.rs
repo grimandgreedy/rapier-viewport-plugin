@@ -1,19 +1,22 @@
-//! A kinematic box driven by the arrow keys, pushing a pile of dynamic balls
-//! across a static floor.
-//!
-//! The pusher's scene transform is updated each frame from keyboard input.
-//! The Rapier prepare plugin reads that transform every fixed step and feeds
-//! it to the kinematic body, so the balls react to the implicit velocity.
+//! A kinematic box driven by the arrow keys, pushing a pile of dynamic
+//! balls. Demonstrates the prepare-phase sync path: the pusher's scene
+//! transform is updated each frame from keyboard input, and
+//! `RapierPreparePlugin` mirrors it into the rapier kinematic body every
+//! step. Rapier converts the position change into an implicit velocity
+//! that pushes the dynamic balls.
 //!
 //! Controls:
 //!   Arrow keys / WASD: move pusher (X/Y plane)
 //!   Left-drag: orbit, Right-drag: pan, Scroll: zoom
 //!
-//! Run with:
-//!   cargo run --example kinematic_pusher
+//! Run with: `cargo run --example kinematic_pusher`
 
 use eframe::egui;
-use rapier_viewport_plugin::{RapierBodyDesc, RapierColliderShape, RapierPlugin};
+use rapier_viewport_plugin::{
+    parry3d::shape::SharedShape,
+    rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder},
+    RapierPlugin,
+};
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
     Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
@@ -137,17 +140,11 @@ impl App {
                 m
             },
         );
-        self.rapier
-            .add_body_from_scene(
-                RapierBodyDesc::fixed(
-                    self.floor_id,
-                    RapierColliderShape::HalfSpace {
-                        outward_normal: glam::Vec3::Z,
-                    },
-                ),
-                &self.scene,
-            )
-            .expect("floor");
+        self.rapier.add_body(
+            self.floor_id,
+            RigidBodyBuilder::fixed().build(),
+            ColliderBuilder::new(SharedShape::halfspace(glam::Vec3::Z)).build(),
+        );
 
         // Kinematic pusher.
         self.pusher_pos = glam::Vec3::new(-3.5, 0.0, PUSHER_HALF.z);
@@ -156,18 +153,17 @@ impl App {
             glam::Mat4::from_translation(self.pusher_pos),
             Material::from_colour([0.3, 0.5, 0.9]),
         );
-        self.rapier
-            .add_body_at(
-                RapierBodyDesc::kinematic(
-                    self.pusher_id,
-                    RapierColliderShape::Cuboid {
-                        half_extents: PUSHER_HALF,
-                    },
-                ),
-                self.pusher_pos,
-                glam::Quat::IDENTITY,
-            )
-            .expect("pusher");
+        // Pusher: a kinematic_position_based body. Its transform is driven by
+        // the scene each step (see the keyboard-driven `scene.set_local_transform`
+        // in `update`). Rapier turns the position delta into the implicit
+        // velocity that pushes other bodies.
+        self.rapier.add_body(
+            self.pusher_id,
+            RigidBodyBuilder::kinematic_position_based()
+                .translation(self.pusher_pos)
+                .build(),
+            ColliderBuilder::cuboid(PUSHER_HALF.x, PUSHER_HALF.y, PUSHER_HALF.z).build(),
+        );
 
         // A pile of balls in front of the pusher.
         self.ball_ids.clear();
@@ -195,15 +191,12 @@ impl App {
                 glam::Mat4::from_translation(pos),
                 Material::from_colour(colours[i % colours.len()]),
             );
-            let desc = RapierBodyDesc::dynamic(
-                id,
-                RapierColliderShape::Ball { radius: BALL_RADIUS },
-            )
-            .with_restitution(0.2)
-            .with_friction(0.4);
-            self.rapier
-                .add_body_at(desc, pos, glam::Quat::IDENTITY)
-                .expect("ball");
+            let body = RigidBodyBuilder::dynamic().translation(pos).build();
+            let collider = ColliderBuilder::ball(BALL_RADIUS)
+                .restitution(0.2)
+                .friction(0.4)
+                .build();
+            self.rapier.add_body(id, body, collider);
             self.ball_ids.push(id);
         }
 

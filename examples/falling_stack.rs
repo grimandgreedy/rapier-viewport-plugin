@@ -1,13 +1,18 @@
-//! Ten boxes stacked above a static floor. Watch them fall and settle.
-//! Use the Reset button to drop them again.
+//! Ten boxes stacked above a static floor. Demonstrates the basics: register
+//! one fixed body and several dynamic bodies, then let the runtime step the
+//! simulation each frame. Dynamic body transforms are written back to the
+//! scene automatically by `RapierSimulatePlugin`.
 //!
 //! Controls: left-drag to orbit, right-drag to pan, scroll to zoom.
 //!
-//! Run with:
-//!   cargo run --example falling_stack
+//! Run with: `cargo run --example falling_stack`
 
 use eframe::egui;
-use rapier_viewport_plugin::{RapierBodyDesc, RapierColliderShape, RapierPlugin};
+use rapier_viewport_plugin::{
+    parry3d::shape::SharedShape,
+    rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder},
+    RapierPlugin,
+};
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
     Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
@@ -103,7 +108,9 @@ impl App {
         self.selection = Selection::new();
         self.rapier = RapierPlugin::new();
 
-        // Static floor at Z = 0. The HalfSpace normal points up (+Z).
+        // ---- Floor: a fixed body with a halfspace collider (infinite plane). ----
+        // Add the scene node first so it can be rendered, then bind a rapier
+        // body+collider to the same NodeId via `add_body`.
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
@@ -113,17 +120,11 @@ impl App {
                 m
             },
         );
-        self.rapier
-            .add_body_from_scene(
-                RapierBodyDesc::fixed(
-                    self.floor_id,
-                    RapierColliderShape::HalfSpace {
-                        outward_normal: glam::Vec3::Z,
-                    },
-                ),
-                &self.scene,
-            )
-            .expect("halfspace floor");
+        self.rapier.add_body(
+            self.floor_id,
+            RigidBodyBuilder::fixed().build(),
+            ColliderBuilder::new(SharedShape::halfspace(glam::Vec3::Z)).build(),
+        );
 
         let colours = [
             [0.9, 0.3, 0.3],
@@ -138,6 +139,10 @@ impl App {
             [1.0, 0.6, 0.5],
         ];
 
+        // ---- Stack of dynamic boxes. ---------------------------------------
+        // Each gets a rapier dynamic rigid body and a cuboid collider. The
+        // initial position goes on the RigidBodyBuilder; the simulate plugin
+        // writes the body's pose back to the scene node every step.
         self.box_ids.clear();
         let half = glam::Vec3::splat(0.5);
         for i in 0..BOX_COUNT {
@@ -155,17 +160,19 @@ impl App {
                 glam::Mat4::from_translation(pos),
                 Material::from_colour(colour),
             );
-            let desc = RapierBodyDesc::dynamic(
-                id,
-                RapierColliderShape::Cuboid { half_extents: half },
-            )
-            .with_initial_linear_velocity(glam::Vec3::new(vx, vy, 0.0));
-            self.rapier
-                .add_body_at(desc, pos, glam::Quat::IDENTITY)
-                .expect("cuboid body");
+            let body = RigidBodyBuilder::dynamic()
+                .translation(pos)
+                .linvel(glam::Vec3::new(vx, vy, 0.0))
+                .build();
+            let collider = ColliderBuilder::cuboid(half.x, half.y, half.z).build();
+            self.rapier.add_body(id, body, collider);
             self.box_ids.push(id);
         }
 
+        // ---- Wire the plugin into the runtime. ----------------------------
+        // `into_plugins` splits the handle into the Prepare-phase and
+        // Simulate-phase RuntimePlugins. Cloning self.rapier first keeps the
+        // handle around so we can still add/remove bodies later.
         let (prepare, simulate) = self.rapier.clone().into_plugins();
         self.runtime = ViewportRuntime::new()
             .with_fixed_timestep(FixedTimestep::new(SIM_HZ))
@@ -278,6 +285,9 @@ impl eframe::App for App {
             self.controller.apply_to_camera(&mut self.camera);
             self.camera.set_aspect_ratio(rect.width(), rect.height());
 
+            // Step the runtime once per frame. The Prepare plugin syncs
+            // fixed/kinematic transforms from the scene; the Simulate plugin
+            // advances rapier and writes dynamic body poses back to the scene.
             let mut frame_ctx = RuntimeFrameContext::default();
             frame_ctx.dt = dt;
             frame_ctx.camera = self.camera.clone();
