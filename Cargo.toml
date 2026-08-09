@@ -1,6 +1,6 @@
 [package]
 name = "rapier-viewport-plugin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Rapier 3D physics plugin for viewport-lib"
@@ -15,7 +15,7 @@ publish = true
 exclude = ["examples/", "docs/", "LOG.md", "capability-coverage.md"]
 
 [dependencies]
-viewport-lib = { path = "../viewport-lib", version = "0.19" }
+viewport-lib = "0.20"
 rapier3d = { version = "0.32", features = ["default"] }
 parry3d = "0.26"
 glam = { version = "=0.30.10", features = ["bytemuck"] }

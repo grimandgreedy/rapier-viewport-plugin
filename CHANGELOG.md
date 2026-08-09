@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.1]
+
+- Update to viewport-lib 0.20. The plugin is source-compatible with 0.20 and
+  needs no code changes.
+
 ## [0.1.0]
 
 First release. Rapier 3D physics as a viewport-lib runtime plugin:
