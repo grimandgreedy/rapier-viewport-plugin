@@ -32,9 +32,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -70,8 +70,10 @@ fn main() -> eframe::Result {
                 .upload_mesh_data(device, &primitives::plane(20.0, 20.0))
                 .expect("floor mesh upload");
 
+            let materials = Materials::upload(res);
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(char_mesh, box_mesh, floor_mesh)))
+            Ok(Box::new(App::new(char_mesh, box_mesh, floor_mesh, materials)))
         }),
     )
 }
@@ -95,12 +97,33 @@ const OBSTACLES: &[(f32, f32)] = &[
 
 // ---------------------------------------------------------------------------
 
+/// Materials uploaded once at setup and shared by every node of a kind.
+struct Materials {
+    floor: MaterialId,
+    obstacle: MaterialId,
+    character: MaterialId,
+}
+
+impl Materials {
+    fn upload(res: &mut viewport_lib::DeviceResources) -> Self {
+        let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+        floor.backface_policy = BackfacePolicy::Identical;
+        let mut upload = |m: Material| res.upload_material(m).expect("material upload");
+        Self {
+            floor: upload(floor),
+            obstacle: upload(Material::from_colour(Colour::from_linear_rgb_array([0.5, 0.55, 0.6]))),
+            character: upload(Material::from_colour(Colour::from_linear_rgb_array([0.9, 0.7, 0.2]))),
+        }
+    }
+}
+
 struct App {
     camera: Camera,
     controller_view: OrbitCameraController,
     char_mesh: MeshId,
     box_mesh: MeshId,
     floor_mesh: MeshId,
+    materials: Materials,
 
     scene: Scene,
     selection: Selection,
@@ -124,7 +147,12 @@ struct App {
 }
 
 impl App {
-    fn new(char_mesh: MeshId, box_mesh: MeshId, floor_mesh: MeshId) -> Self {
+    fn new(
+        char_mesh: MeshId,
+        box_mesh: MeshId,
+        floor_mesh: MeshId,
+        materials: Materials,
+    ) -> Self {
         // Our world is Z-up, but the default controller's `up` is Y.
         // Override it so floor / slope detection works correctly.
         let mut char_controller = KinematicCharacterController::default();
@@ -140,6 +168,7 @@ impl App {
             char_mesh,
             box_mesh,
             floor_mesh,
+            materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -169,11 +198,7 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.materials.floor,
         );
         self.rapier.add_body(
             self.floor_id,
@@ -188,7 +213,7 @@ impl App {
             let id = self.scene.add(
                 Some(self.box_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour([0.5, 0.55, 0.6]),
+                self.materials.obstacle,
             );
             self.rapier.add_body(
                 id,
@@ -206,7 +231,7 @@ impl App {
         self.char_id = self.scene.add(
             Some(self.char_mesh),
             glam::Mat4::from_translation(self.char_pos),
-            Material::from_colour([0.9, 0.7, 0.2]),
+            self.materials.character,
         );
         self.rapier.add_body(
             self.char_id,
@@ -422,28 +447,22 @@ impl eframe::App for App {
             // Character (kinematic: render straight from the scene
             // transform, no interpolation since position is user-driven).
             if let Some(node) = self.scene.node(self.char_id) {
-                let mut item = SceneRenderItem::default();
-                item.mesh_id = self.char_mesh;
+                let mut item = SceneRenderItem::new(self.char_mesh, node.material());
                 item.model = node.world_transform().to_cols_array_2d();
-                item.material = *node.material();
                 items.push(item);
             }
 
             // Obstacles + floor.
             for &id in &self.obstacle_ids {
                 if let Some(node) = self.scene.node(id) {
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.box_mesh;
+                    let mut item = SceneRenderItem::new(self.box_mesh, node.material());
                     item.model = node.world_transform().to_cols_array_2d();
-                    item.material = *node.material();
                     items.push(item);
                 }
             }
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut item = SceneRenderItem::default();
-                item.mesh_id = self.floor_mesh;
+                let mut item = SceneRenderItem::new(self.floor_mesh, node.material());
                 item.model = node.world_transform().to_cols_array_2d();
-                item.material = *node.material();
                 items.push(item);
             }
 

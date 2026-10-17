@@ -20,9 +20,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -55,8 +55,10 @@ fn main() -> eframe::Result {
                 )
                 .expect("wall mesh upload");
 
+            let materials = Materials::upload(res);
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(ball_mesh, floor_mesh, wall_mesh)))
+            Ok(Box::new(App::new(ball_mesh, floor_mesh, wall_mesh, materials)))
         }),
     )
 }
@@ -80,12 +82,33 @@ const COLOUR_BLUE: [f32; 3] = [0.3, 0.5, 0.95];
 
 // ---------------------------------------------------------------------------
 
+/// Materials uploaded once at setup and shared by every node of a kind.
+struct Materials {
+    floor: MaterialId,
+    wall: MaterialId,
+    balls: [MaterialId; 3],
+}
+
+impl Materials {
+    fn upload(res: &mut viewport_lib::DeviceResources) -> Self {
+        let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+        floor.backface_policy = BackfacePolicy::Identical;
+        let mut upload = |m: Material| res.upload_material(m).expect("material upload");
+        Self {
+            floor: upload(floor),
+            wall: upload(Material::from_colour(Colour::from_linear_rgb_array([0.5, 0.5, 0.55]))),
+            balls: [COLOUR_RED, COLOUR_GREEN, COLOUR_BLUE].map(|c| upload(Material::from_colour(Colour::from_linear_rgb_array(c)))),
+        }
+    }
+}
+
 struct App {
     camera: Camera,
     controller: OrbitCameraController,
     ball_mesh: MeshId,
     floor_mesh: MeshId,
     wall_mesh: MeshId,
+    materials: Materials,
 
     scene: Scene,
     selection: Selection,
@@ -103,7 +126,12 @@ struct App {
 }
 
 impl App {
-    fn new(ball_mesh: MeshId, floor_mesh: MeshId, wall_mesh: MeshId) -> Self {
+    fn new(
+        ball_mesh: MeshId,
+        floor_mesh: MeshId,
+        wall_mesh: MeshId,
+        materials: Materials,
+    ) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, 1.0),
@@ -114,6 +142,7 @@ impl App {
             ball_mesh,
             floor_mesh,
             wall_mesh,
+            materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -140,11 +169,7 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.materials.floor,
         );
         self.rapier.add_body(
             self.floor_id,
@@ -160,7 +185,6 @@ impl App {
         // same XY position, intersecting each other, because they don't
         // push each other apart.
         self.wall_ids.clear();
-        let wall_colour = Material::from_colour([0.5, 0.5, 0.55]);
         let wall_z = WALL_HEIGHT;
         let walls = [
             (glam::Vec3::new(0.0, PIT_HALF, wall_z), glam::Quat::IDENTITY),
@@ -178,7 +202,7 @@ impl App {
             let id = self.scene.add(
                 Some(self.wall_mesh),
                 glam::Mat4::from_rotation_translation(rot, pos),
-                wall_colour,
+                self.materials.wall,
             );
             self.rapier.add_body(
                 id,
@@ -199,16 +223,13 @@ impl App {
         // stack; different-colour balls pass through each other and end up
         // intersecting in the pile -- which is precisely the effect the
         // demo is here to show.
-        let groups_by_layer: [(Group, [f32; 3]); 3] = [
-            (Group::GROUP_1, COLOUR_RED),
-            (Group::GROUP_2, COLOUR_GREEN),
-            (Group::GROUP_3, COLOUR_BLUE),
-        ];
+        let groups_by_layer = [Group::GROUP_1, Group::GROUP_2, Group::GROUP_3];
 
         self.ball_ids.clear();
         let total = BALLS_PER_GROUP * groups_by_layer.len();
         for i in 0..total {
-            let (group, colour) = groups_by_layer[i % groups_by_layer.len()];
+            let layer = i % groups_by_layer.len();
+            let group = groups_by_layer[layer];
             // collision_groups: this collider is in `group`; it filters
             // `group` too -- only collides with same-group colliders (the
             // walls and floor are in InteractionGroups::all() so they hit
@@ -234,7 +255,7 @@ impl App {
             let id = self.scene.add(
                 Some(self.ball_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(colour),
+                self.materials.balls[layer],
             );
             self.rapier.add_body(
                 id,
@@ -380,29 +401,23 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(glam::Mat4::from)
                         .unwrap_or(world);
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.ball_mesh;
+                    let mut item = SceneRenderItem::new(self.ball_mesh, node.material());
                     item.model = model.to_cols_array_2d();
-                    item.material = *node.material();
                     Some(item)
                 })
                 .collect();
 
             for &wall_id in &self.wall_ids {
                 if let Some(node) = self.scene.node(wall_id) {
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.wall_mesh;
+                    let mut item = SceneRenderItem::new(self.wall_mesh, node.material());
                     item.model = node.world_transform().to_cols_array_2d();
-                    item.material = *node.material();
                     items.push(item);
                 }
             }
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut item = SceneRenderItem::default();
-                item.mesh_id = self.floor_mesh;
+                let mut item = SceneRenderItem::new(self.floor_mesh, node.material());
                 item.model = node.world_transform().to_cols_array_2d();
-                item.material = *node.material();
                 items.push(item);
             }
 

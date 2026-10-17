@@ -15,9 +15,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -50,8 +50,10 @@ fn main() -> eframe::Result {
                 )
                 .expect("wall mesh upload");
 
+            let materials = Materials::upload(res);
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(sphere_mesh, floor_mesh, wall_mesh)))
+            Ok(Box::new(App::new(sphere_mesh, floor_mesh, wall_mesh, materials)))
         }),
     )
 }
@@ -68,7 +70,38 @@ const WALL_THICKNESS: f32 = 0.25;
 const WALL_HEIGHT: f32 = 0.6;
 const LAUNCH_SPEED: f32 = 13.0;
 
+const BALL_COLOURS: [[f32; 3]; 8] = [
+    [0.9, 0.3, 0.3],
+    [0.9, 0.6, 0.2],
+    [0.8, 0.8, 0.2],
+    [0.3, 0.8, 0.3],
+    [0.2, 0.7, 0.8],
+    [0.3, 0.4, 0.9],
+    [0.7, 0.3, 0.9],
+    [0.9, 0.3, 0.7],
+];
+
 // ---------------------------------------------------------------------------
+
+/// Materials uploaded once at setup and shared by every node of a kind.
+struct Materials {
+    floor: MaterialId,
+    wall: MaterialId,
+    balls: Vec<MaterialId>,
+}
+
+impl Materials {
+    fn upload(res: &mut viewport_lib::DeviceResources) -> Self {
+        let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+        floor.backface_policy = BackfacePolicy::Identical;
+        let mut upload = |m: Material| res.upload_material(m).expect("material upload");
+        Self {
+            floor: upload(floor),
+            wall: upload(Material::from_colour(Colour::from_linear_rgb_array([0.5, 0.5, 0.55]))),
+            balls: BALL_COLOURS.iter().map(|&c| upload(Material::from_colour(Colour::from_linear_rgb_array(c)))).collect(),
+        }
+    }
+}
 
 struct App {
     camera: Camera,
@@ -76,6 +109,7 @@ struct App {
     sphere_mesh: MeshId,
     floor_mesh: MeshId,
     wall_mesh: MeshId,
+    materials: Materials,
 
     scene: Scene,
     selection: Selection,
@@ -96,7 +130,12 @@ struct App {
 }
 
 impl App {
-    fn new(sphere_mesh: MeshId, floor_mesh: MeshId, wall_mesh: MeshId) -> Self {
+    fn new(
+        sphere_mesh: MeshId,
+        floor_mesh: MeshId,
+        wall_mesh: MeshId,
+        materials: Materials,
+    ) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, 1.5),
@@ -107,6 +146,7 @@ impl App {
             sphere_mesh,
             floor_mesh,
             wall_mesh,
+            materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -136,11 +176,7 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.materials.floor,
         );
         self.rapier.add_body(
             self.floor_id,
@@ -151,7 +187,6 @@ impl App {
         // Four walls forming a square arena around the origin. Each wall is a
         // thin cuboid placed at one edge of the box.
         self.wall_ids.clear();
-        let wall_colour = Material::from_colour([0.5, 0.5, 0.55]);
         let wall_offsets = [
             (glam::Vec3::new(0.0, BOX_HALF, WALL_HEIGHT), glam::Quat::IDENTITY),
             (glam::Vec3::new(0.0, -BOX_HALF, WALL_HEIGHT), glam::Quat::IDENTITY),
@@ -168,7 +203,7 @@ impl App {
             let id = self.scene.add(
                 Some(self.wall_mesh),
                 glam::Mat4::from_rotation_translation(rot, pos),
-                wall_colour,
+                self.materials.wall,
             );
             let body = RigidBodyBuilder::fixed()
                 .translation(pos)
@@ -183,16 +218,6 @@ impl App {
 
         // Balls launched inward from positions around the box edges.
         self.ball_ids.clear();
-        let colours = [
-            [0.9, 0.3, 0.3],
-            [0.9, 0.6, 0.2],
-            [0.8, 0.8, 0.2],
-            [0.3, 0.8, 0.3],
-            [0.2, 0.7, 0.8],
-            [0.3, 0.4, 0.9],
-            [0.7, 0.3, 0.9],
-            [0.9, 0.3, 0.7],
-        ];
         for i in 0..BALL_COUNT {
             let fi = i as f32;
             // Place balls on a ring inside the arena, with velocities aimed at
@@ -211,11 +236,10 @@ impl App {
             let tangent = glam::Vec3::new(-angle.sin(), angle.cos(), 0.0);
             let vel = inward * LAUNCH_SPEED + tangent * (LAUNCH_SPEED * 0.3);
 
-            let colour = colours[i % colours.len()];
             let id = self.scene.add(
                 Some(self.sphere_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(colour),
+                self.materials.balls[i % self.materials.balls.len()],
             );
             // ActiveEvents::COLLISION_EVENTS on the collider is what makes
             // this body emit `RapierContactEvent`s on the runtime output bus.
@@ -379,30 +403,24 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(glam::Mat4::from)
                         .unwrap_or(world);
-                    let mat = *self.scene.node(id)?.material();
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.sphere_mesh;
+                    let mat = self.scene.node(id)?.material();
+                    let mut item = SceneRenderItem::new(self.sphere_mesh, mat);
                     item.model = model.to_cols_array_2d();
-                    item.material = mat;
                     Some(item)
                 })
                 .collect();
 
             for &wall_id in &self.wall_ids {
                 if let Some(node) = self.scene.node(wall_id) {
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.wall_mesh;
+                    let mut item = SceneRenderItem::new(self.wall_mesh, node.material());
                     item.model = node.world_transform().to_cols_array_2d();
-                    item.material = *node.material();
                     items.push(item);
                 }
             }
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut floor_item = SceneRenderItem::default();
-                floor_item.mesh_id = self.floor_mesh;
+                let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
                 floor_item.model = node.world_transform().to_cols_array_2d();
-                floor_item.material = *node.material();
                 items.push(floor_item);
             }
 

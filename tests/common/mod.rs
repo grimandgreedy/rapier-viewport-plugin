@@ -7,7 +7,7 @@
 
 use rapier_viewport_plugin::RapierPlugin;
 use viewport_lib::{
-    FixedTimestep, Material, NodeId, Scene, ViewportRuntime,
+    FixedTimestep, MaterialId, NodeId, Scene, ViewportRuntime,
 };
 
 /// Add a node with no mesh at the given world-space translation. Used to
@@ -16,7 +16,7 @@ pub fn add_node_at(scene: &mut Scene, pos: glam::Vec3) -> NodeId {
     scene.add(
         None,
         glam::Mat4::from_translation(pos),
-        Material::from_colour([1.0, 1.0, 1.0]),
+        MaterialId::DEFAULT,
     )
 }
 

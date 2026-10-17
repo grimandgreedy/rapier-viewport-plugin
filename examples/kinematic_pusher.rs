@@ -19,9 +19,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -58,8 +58,10 @@ fn main() -> eframe::Result {
                 )
                 .expect("box mesh upload");
 
+            let materials = Materials::upload(res);
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(sphere_mesh, floor_mesh, box_mesh)))
+            Ok(Box::new(App::new(sphere_mesh, floor_mesh, box_mesh, materials)))
         }),
     )
 }
@@ -74,12 +76,44 @@ const PUSHER_SPEED: f32 = 5.0;
 
 // ---------------------------------------------------------------------------
 
+const BALL_COLOURS: [[f32; 3]; 8] = [
+    [0.9, 0.3, 0.3],
+    [0.9, 0.6, 0.2],
+    [0.8, 0.8, 0.2],
+    [0.3, 0.8, 0.3],
+    [0.2, 0.7, 0.8],
+    [0.3, 0.4, 0.9],
+    [0.7, 0.3, 0.9],
+    [0.9, 0.3, 0.7],
+];
+
+/// Materials uploaded once at setup and shared by every node of a kind.
+struct Materials {
+    floor: MaterialId,
+    pusher: MaterialId,
+    balls: Vec<MaterialId>,
+}
+
+impl Materials {
+    fn upload(res: &mut viewport_lib::DeviceResources) -> Self {
+        let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+        floor.backface_policy = BackfacePolicy::Identical;
+        let mut upload = |m: Material| res.upload_material(m).expect("material upload");
+        Self {
+            floor: upload(floor),
+            pusher: upload(Material::from_colour(Colour::from_linear_rgb_array([0.3, 0.5, 0.9]))),
+            balls: BALL_COLOURS.iter().map(|&c| upload(Material::from_colour(Colour::from_linear_rgb_array(c)))).collect(),
+        }
+    }
+}
+
 struct App {
     camera: Camera,
     controller: OrbitCameraController,
     sphere_mesh: MeshId,
     floor_mesh: MeshId,
     box_mesh: MeshId,
+    materials: Materials,
 
     scene: Scene,
     selection: Selection,
@@ -98,7 +132,12 @@ struct App {
 }
 
 impl App {
-    fn new(sphere_mesh: MeshId, floor_mesh: MeshId, box_mesh: MeshId) -> Self {
+    fn new(
+        sphere_mesh: MeshId,
+        floor_mesh: MeshId,
+        box_mesh: MeshId,
+        materials: Materials,
+    ) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, 1.0),
@@ -109,6 +148,7 @@ impl App {
             sphere_mesh,
             floor_mesh,
             box_mesh,
+            materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -134,11 +174,7 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.materials.floor,
         );
         self.rapier.add_body(
             self.floor_id,
@@ -151,7 +187,7 @@ impl App {
         self.pusher_id = self.scene.add(
             Some(self.box_mesh),
             glam::Mat4::from_translation(self.pusher_pos),
-            Material::from_colour([0.3, 0.5, 0.9]),
+            self.materials.pusher,
         );
         // Pusher: a kinematic_position_based body. Its transform is driven by
         // the scene each step (see the keyboard-driven `scene.set_local_transform`
@@ -167,16 +203,6 @@ impl App {
 
         // A pile of balls in front of the pusher.
         self.ball_ids.clear();
-        let colours = [
-            [0.9, 0.3, 0.3],
-            [0.9, 0.6, 0.2],
-            [0.8, 0.8, 0.2],
-            [0.3, 0.8, 0.3],
-            [0.2, 0.7, 0.8],
-            [0.3, 0.4, 0.9],
-            [0.7, 0.3, 0.9],
-            [0.9, 0.3, 0.7],
-        ];
         for i in 0..BALL_COUNT {
             let fi = i as f32;
             let row = (i / 4) as f32;
@@ -189,7 +215,7 @@ impl App {
             let id = self.scene.add(
                 Some(self.sphere_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(colours[i % colours.len()]),
+                self.materials.balls[i % self.materials.balls.len()],
             );
             let body = RigidBodyBuilder::dynamic().translation(pos).build();
             let collider = ColliderBuilder::ball(BALL_RADIUS)
@@ -360,11 +386,9 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(glam::Mat4::from)
                         .unwrap_or(world);
-                    let mat = *self.scene.node(id)?.material();
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.sphere_mesh;
+                    let mat = self.scene.node(id)?.material();
+                    let mut item = SceneRenderItem::new(self.sphere_mesh, mat);
                     item.model = model.to_cols_array_2d();
-                    item.material = mat;
                     Some(item)
                 })
                 .collect();
@@ -372,18 +396,14 @@ impl eframe::App for App {
             // Pusher (kinematic: render from its scene transform directly, no
             // physics interpolation since position is user-driven).
             if let Some(node) = self.scene.node(self.pusher_id) {
-                let mut item = SceneRenderItem::default();
-                item.mesh_id = self.box_mesh;
+                let mut item = SceneRenderItem::new(self.box_mesh, node.material());
                 item.model = node.world_transform().to_cols_array_2d();
-                item.material = *node.material();
                 items.push(item);
             }
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut floor_item = SceneRenderItem::default();
-                floor_item.mesh_id = self.floor_mesh;
+                let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
                 floor_item.model = node.world_transform().to_cols_array_2d();
-                floor_item.material = *node.material();
                 items.push(floor_item);
             }
 

@@ -24,10 +24,10 @@ use rapier_viewport_plugin::{
     RapierPlugin,
 };
 use viewport_lib::{
-    ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings, Material, MeshId,
-    Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext, Scene, SceneFrame,
-    SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent, ViewportRenderer,
-    ViewportRuntime, primitives,
+    ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings, Colour, Material,
+    MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
+    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
+    ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -58,8 +58,13 @@ fn main() -> eframe::Result {
                 )
                 .expect("link mesh upload");
 
+            let link_materials = LINK_COLOURS
+                .iter()
+                .map(|&c| res.upload_material(Material::from_colour(Colour::from_linear_rgb_array(c))).expect("link material"))
+                .collect();
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(link_mesh)))
+            Ok(Box::new(App::new(link_mesh, link_materials)))
         }),
     )
 }
@@ -67,6 +72,16 @@ fn main() -> eframe::Result {
 // ---------------------------------------------------------------------------
 
 const SIM_HZ: f32 = 240.0;
+
+const LINK_COLOURS: [[f32; 3]; 7] = [
+    [0.9, 0.3, 0.3],
+    [0.9, 0.6, 0.2],
+    [0.8, 0.8, 0.2],
+    [0.3, 0.8, 0.3],
+    [0.2, 0.7, 0.8],
+    [0.3, 0.4, 0.9],
+    [0.7, 0.3, 0.9],
+];
 const CHAIN_LEN: usize = 7;
 const LINK_HALF: glam::Vec3 = glam::Vec3::new(0.15, 0.15, 0.35);
 const LINK_DENSITY: f32 = 8.0;
@@ -90,6 +105,7 @@ struct App {
     camera: Camera,
     controller: OrbitCameraController,
     link_mesh: MeshId,
+    link_materials: Vec<MaterialId>,
 
     scene: Scene,
     selection: Selection,
@@ -108,7 +124,7 @@ struct App {
 }
 
 impl App {
-    fn new(link_mesh: MeshId) -> Self {
+    fn new(link_mesh: MeshId, link_materials: Vec<MaterialId>) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, -1.8),
@@ -117,6 +133,7 @@ impl App {
             },
             controller: OrbitCameraController::viewport_primitives(),
             link_mesh,
+            link_materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -140,9 +157,9 @@ impl App {
         // ---- Anchor: a fixed body at the origin with no visible mesh. ------
         // Its collider is a tiny sensor so it can't physically interact with
         // the chain -- it exists only as the joint's parent body.
-        self.anchor_id =
-            self.scene
-                .add(None, glam::Mat4::IDENTITY, Material::from_colour([0.0; 3]));
+        self.anchor_id = self
+            .scene
+            .add(None, glam::Mat4::IDENTITY, MaterialId::DEFAULT);
         self.rapier.add_body(
             self.anchor_id,
             RigidBodyBuilder::fixed().build(),
@@ -153,23 +170,13 @@ impl App {
         // Damping lets the chain settle naturally instead of swinging
         // forever, and gives each link's relative oscillation time to
         // develop into visible flex when the bottom is kicked.
-        let colours = [
-            [0.9, 0.3, 0.3],
-            [0.9, 0.6, 0.2],
-            [0.8, 0.8, 0.2],
-            [0.3, 0.8, 0.3],
-            [0.2, 0.7, 0.8],
-            [0.3, 0.4, 0.9],
-            [0.7, 0.3, 0.9],
-        ];
-
         self.chain_ids.clear();
         for i in 0..CHAIN_LEN {
             let pos = glam::Vec3::new(0.0, 0.0, link_center_z(i));
             let id = self.scene.add(
                 Some(self.link_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(colours[i % colours.len()]),
+                self.link_materials[i % self.link_materials.len()],
             );
             let body = RigidBodyBuilder::dynamic()
                 .translation(pos)
@@ -375,10 +382,8 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(glam::Mat4::from)
                         .unwrap_or(world);
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.link_mesh;
+                    let mut item = SceneRenderItem::new(self.link_mesh, node.material());
                     item.model = model.to_cols_array_2d();
-                    item.material = *node.material();
                     Some(item)
                 })
                 .collect();

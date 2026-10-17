@@ -30,9 +30,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -65,12 +65,23 @@ fn main() -> eframe::Result {
                 .upload_mesh_data(device, &primitives::sphere(0.1, 16, 8))
                 .expect("marker mesh upload");
 
+            // One white material for the bodies and the marker; each body's
+            // colour goes through its item settings.
+            let plastic = res
+                .upload_material(Material::from_colour(Colour::from_linear_rgb_array([1.0, 1.0, 1.0])))
+                .expect("body material");
+            let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+            floor.backface_policy = BackfacePolicy::Identical;
+            let floor_material = res.upload_material(floor).expect("floor material");
+
             rs.renderer.write().callback_resources.insert(renderer);
             Ok(Box::new(App::new(
                 box_mesh,
                 sphere_mesh,
                 floor_mesh,
                 marker_mesh,
+                plastic,
+                floor_material,
             )))
         }),
     )
@@ -93,6 +104,8 @@ struct App {
     sphere_mesh: MeshId,
     floor_mesh: MeshId,
     marker_mesh: MeshId,
+    plastic: MaterialId,
+    floor_material: MaterialId,
 
     scene: Scene,
     selection: Selection,
@@ -116,7 +129,14 @@ struct HitInfo {
 }
 
 impl App {
-    fn new(box_mesh: MeshId, sphere_mesh: MeshId, floor_mesh: MeshId, marker_mesh: MeshId) -> Self {
+    fn new(
+        box_mesh: MeshId,
+        sphere_mesh: MeshId,
+        floor_mesh: MeshId,
+        marker_mesh: MeshId,
+        plastic: MaterialId,
+        floor_material: MaterialId,
+    ) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, 0.6),
@@ -128,6 +148,8 @@ impl App {
             sphere_mesh,
             floor_mesh,
             marker_mesh,
+            plastic,
+            floor_material,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -152,11 +174,7 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.floor_material,
         );
         self.rapier.add_body(
             self.floor_id,
@@ -210,7 +228,7 @@ impl App {
             let id = self.scene.add(
                 Some(mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(colour),
+                self.plastic,
             );
             let body = RigidBodyBuilder::dynamic().translation(pos).build();
             self.rapier.add_body(id, body, collider);
@@ -440,29 +458,24 @@ impl eframe::App for App {
                     } else {
                         self.body_colours[i]
                     };
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = mesh_id;
+                    let mut item = SceneRenderItem::new(mesh_id, self.plastic);
+                    item.settings.colour = Some(Colour::from_linear_rgb_array(colour));
                     item.model = model.to_cols_array_2d();
-                    item.material = Material::from_colour(colour);
                     Some(item)
                 })
                 .collect();
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut floor_item = SceneRenderItem::default();
-                floor_item.mesh_id = self.floor_mesh;
+                let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
                 floor_item.model = node.world_transform().to_cols_array_2d();
-                floor_item.material = *node.material();
                 items.push(floor_item);
             }
 
             // Small white marker at the hit point shows exactly where the ray
             // landed on the highlighted body.
             if let Some(hit) = self.aimed {
-                let mut marker = SceneRenderItem::default();
-                marker.mesh_id = self.marker_mesh;
+                let mut marker = SceneRenderItem::new(self.marker_mesh, self.plastic);
                 marker.model = glam::Mat4::from_translation(hit.point).to_cols_array_2d();
-                marker.material = Material::from_colour([1.0, 1.0, 1.0]);
                 items.push(marker);
             }
 

@@ -21,9 +21,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -60,8 +60,10 @@ fn main() -> eframe::Result {
                 )
                 .expect("sensor mesh upload");
 
+            let materials = Materials::upload(res);
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(ball_mesh, floor_mesh, sensor_mesh)))
+            Ok(Box::new(App::new(ball_mesh, floor_mesh, sensor_mesh, materials)))
         }),
     )
 }
@@ -79,12 +81,42 @@ const SENSOR_COLOUR_HOT: [f32; 3] = [1.0, 0.7, 0.2];
 
 // ---------------------------------------------------------------------------
 
+const BALL_COLOURS: [[f32; 3]; 4] = [
+    [0.9, 0.3, 0.3],
+    [0.8, 0.8, 0.2],
+    [0.3, 0.8, 0.3],
+    [0.7, 0.3, 0.9],
+];
+
+/// Materials uploaded once at setup and shared by every node of a kind.
+struct Materials {
+    floor: MaterialId,
+    sensor_idle: MaterialId,
+    sensor_hot: MaterialId,
+    balls: Vec<MaterialId>,
+}
+
+impl Materials {
+    fn upload(res: &mut viewport_lib::DeviceResources) -> Self {
+        let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+        floor.backface_policy = BackfacePolicy::Identical;
+        let mut upload = |m: Material| res.upload_material(m).expect("material upload");
+        Self {
+            floor: upload(floor),
+            sensor_idle: upload(Material::from_colour(Colour::from_linear_rgb_array(SENSOR_COLOUR_IDLE))),
+            sensor_hot: upload(Material::from_colour(Colour::from_linear_rgb_array(SENSOR_COLOUR_HOT))),
+            balls: BALL_COLOURS.iter().map(|&c| upload(Material::from_colour(Colour::from_linear_rgb_array(c)))).collect(),
+        }
+    }
+}
+
 struct App {
     camera: Camera,
     controller: OrbitCameraController,
     ball_mesh: MeshId,
     floor_mesh: MeshId,
     sensor_mesh: MeshId,
+    materials: Materials,
 
     scene: Scene,
     selection: Selection,
@@ -106,7 +138,12 @@ struct App {
 }
 
 impl App {
-    fn new(ball_mesh: MeshId, floor_mesh: MeshId, sensor_mesh: MeshId) -> Self {
+    fn new(
+        ball_mesh: MeshId,
+        floor_mesh: MeshId,
+        sensor_mesh: MeshId,
+        materials: Materials,
+    ) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, 2.0),
@@ -117,6 +154,7 @@ impl App {
             ball_mesh,
             floor_mesh,
             sensor_mesh,
+            materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -148,11 +186,7 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.materials.floor,
         );
         self.rapier.add_body(
             self.floor_id,
@@ -166,7 +200,7 @@ impl App {
         self.sensor_id = self.scene.add(
             Some(self.sensor_mesh),
             glam::Mat4::from_translation(sensor_pos),
-            Material::from_colour(SENSOR_COLOUR_IDLE),
+            self.materials.sensor_idle,
         );
         self.rapier.add_body(
             self.sensor_id,
@@ -181,12 +215,6 @@ impl App {
         // Both the sensor and the ball need ActiveEvents::COLLISION_EVENTS
         // for an event to be emitted -- rapier fires the event if *either*
         // collider has the flag, so we set it on the balls too to be safe.
-        let palette = [
-            [0.9, 0.3, 0.3],
-            [0.8, 0.8, 0.2],
-            [0.3, 0.8, 0.3],
-            [0.7, 0.3, 0.9],
-        ];
         self.ball_ids.clear();
         for i in 0..BALL_COUNT {
             let fi = i as f32;
@@ -198,7 +226,7 @@ impl App {
             let id = self.scene.add(
                 Some(self.ball_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(palette[i % palette.len()]),
+                self.materials.balls[i % self.materials.balls.len()],
             );
             self.rapier.add_body(
                 id,
@@ -368,10 +396,8 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(glam::Mat4::from)
                         .unwrap_or(world);
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.ball_mesh;
+                    let mut item = SceneRenderItem::new(self.ball_mesh, node.material());
                     item.model = model.to_cols_array_2d();
-                    item.material = *node.material();
                     Some(item)
                 })
                 .collect();
@@ -379,23 +405,19 @@ impl eframe::App for App {
             // Sensor: tinted when something is inside, so the visual matches
             // the counter in the side panel.
             if let Some(node) = self.scene.node(self.sensor_id) {
-                let mut item = SceneRenderItem::default();
-                item.mesh_id = self.sensor_mesh;
-                item.model = node.world_transform().to_cols_array_2d();
-                let colour = if self.inside_now > 0 {
-                    SENSOR_COLOUR_HOT
+                let material = if self.inside_now > 0 {
+                    self.materials.sensor_hot
                 } else {
-                    SENSOR_COLOUR_IDLE
+                    self.materials.sensor_idle
                 };
-                item.material = Material::from_colour(colour);
+                let mut item = SceneRenderItem::new(self.sensor_mesh, material);
+                item.model = node.world_transform().to_cols_array_2d();
                 items.push(item);
             }
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut item = SceneRenderItem::default();
-                item.mesh_id = self.floor_mesh;
+                let mut item = SceneRenderItem::new(self.floor_mesh, node.material());
                 item.model = node.world_transform().to_cols_array_2d();
-                item.material = *node.material();
                 items.push(item);
             }
 

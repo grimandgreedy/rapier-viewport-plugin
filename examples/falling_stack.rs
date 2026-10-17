@@ -15,9 +15,9 @@ use rapier_viewport_plugin::{
 };
 use viewport_lib::{
     BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Material, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
-    ViewportRenderer, ViewportRuntime, primitives,
+    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 
 fn main() -> eframe::Result {
@@ -44,8 +44,16 @@ fn main() -> eframe::Result {
                 .upload_mesh_data(device, &primitives::plane(20.0, 20.0))
                 .expect("floor mesh upload");
 
+            let mut floor = Material::from_colour(Colour::from_linear_rgb_array([0.35, 0.35, 0.35]));
+            floor.backface_policy = BackfacePolicy::Identical;
+            let floor_material = res.upload_material(floor).expect("floor material");
+            let box_materials = BOX_COLOURS
+                .iter()
+                .map(|&c| res.upload_material(Material::from_colour(Colour::from_linear_rgb_array(c))).expect("box material"))
+                .collect();
+
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(App::new(box_mesh, floor_mesh)))
+            Ok(Box::new(App::new(box_mesh, floor_mesh, floor_material, box_materials)))
         }),
     )
 }
@@ -55,6 +63,19 @@ fn main() -> eframe::Result {
 const BOX_COUNT: usize = 10;
 const SIM_HZ: f32 = 120.0;
 
+const BOX_COLOURS: [[f32; 3]; 10] = [
+    [0.9, 0.3, 0.3],
+    [0.9, 0.6, 0.2],
+    [0.8, 0.8, 0.2],
+    [0.3, 0.8, 0.3],
+    [0.2, 0.7, 0.8],
+    [0.3, 0.4, 0.9],
+    [0.7, 0.3, 0.9],
+    [0.9, 0.3, 0.7],
+    [0.6, 0.9, 0.5],
+    [1.0, 0.6, 0.5],
+];
+
 // ---------------------------------------------------------------------------
 
 struct App {
@@ -62,6 +83,8 @@ struct App {
     controller: OrbitCameraController,
     box_mesh: MeshId,
     floor_mesh: MeshId,
+    floor_material: MaterialId,
+    box_materials: Vec<MaterialId>,
 
     scene: Scene,
     selection: Selection,
@@ -78,7 +101,12 @@ struct App {
 }
 
 impl App {
-    fn new(box_mesh: MeshId, floor_mesh: MeshId) -> Self {
+    fn new(
+        box_mesh: MeshId,
+        floor_mesh: MeshId,
+        floor_material: MaterialId,
+        box_materials: Vec<MaterialId>,
+    ) -> Self {
         let mut app = Self {
             camera: Camera {
                 center: glam::Vec3::new(0.0, 0.0, 5.0),
@@ -88,6 +116,8 @@ impl App {
             controller: OrbitCameraController::viewport_primitives(),
             box_mesh,
             floor_mesh,
+            floor_material,
+            box_materials,
             scene: Scene::new(),
             selection: Selection::new(),
             runtime: ViewportRuntime::new(),
@@ -114,30 +144,13 @@ impl App {
         self.floor_id = self.scene.add(
             Some(self.floor_mesh),
             glam::Mat4::IDENTITY,
-            {
-                let mut m = Material::from_colour([0.35, 0.35, 0.35]);
-                m.backface_policy = BackfacePolicy::Identical;
-                m
-            },
+            self.floor_material,
         );
         self.rapier.add_body(
             self.floor_id,
             RigidBodyBuilder::fixed().build(),
             ColliderBuilder::new(SharedShape::halfspace(glam::Vec3::Z)).build(),
         );
-
-        let colours = [
-            [0.9, 0.3, 0.3],
-            [0.9, 0.6, 0.2],
-            [0.8, 0.8, 0.2],
-            [0.3, 0.8, 0.3],
-            [0.2, 0.7, 0.8],
-            [0.3, 0.4, 0.9],
-            [0.7, 0.3, 0.9],
-            [0.9, 0.3, 0.7],
-            [0.6, 0.9, 0.5],
-            [1.0, 0.6, 0.5],
-        ];
 
         // ---- Stack of dynamic boxes. ---------------------------------------
         // Each gets a rapier dynamic rigid body and a cuboid collider. The
@@ -154,11 +167,10 @@ impl App {
             // Small lateral drift so adjacent boxes don't land perfectly centred.
             let vx = (fi * 1.1 + 0.5).sin() * 0.5;
             let vy = (fi * 0.8 + 1.2).cos() * 0.5;
-            let colour = colours[i % colours.len()];
-            let id = self.scene.add(
+                        let id = self.scene.add(
                 Some(self.box_mesh),
                 glam::Mat4::from_translation(pos),
-                Material::from_colour(colour),
+                self.box_materials[i % self.box_materials.len()],
             );
             let body = RigidBodyBuilder::dynamic()
                 .translation(pos)
@@ -307,20 +319,16 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(glam::Mat4::from)
                         .unwrap_or(world);
-                    let mat = *self.scene.node(id)?.material();
-                    let mut item = SceneRenderItem::default();
-                    item.mesh_id = self.box_mesh;
+                    let mat = self.scene.node(id)?.material();
+                    let mut item = SceneRenderItem::new(self.box_mesh, mat);
                     item.model = model.to_cols_array_2d();
-                    item.material = mat;
                     Some(item)
                 })
                 .collect();
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut floor_item = SceneRenderItem::default();
-                floor_item.mesh_id = self.floor_mesh;
+                let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
                 floor_item.model = node.world_transform().to_cols_array_2d();
-                floor_item.material = *node.material();
                 items.push(floor_item);
             }
 
