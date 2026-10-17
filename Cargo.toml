@@ -15,7 +15,7 @@ publish = true
 exclude = ["examples/", "docs/", "LOG.md", "capability-coverage.md"]
 
 [dependencies]
-viewport-lib = "0.20"
+viewport-lib = "0.22"
 rapier3d = { version = "0.32", features = ["default"] }
 parry3d = "0.26"
 glam = { version = "=0.30.10", features = ["bytemuck"] }
