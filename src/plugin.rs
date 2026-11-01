@@ -238,7 +238,10 @@ impl RuntimePlugin for RapierPreparePlugin {
             };
             let m = node.world_transform();
             let (_, rotation, translation) = m.to_scale_rotation_translation();
-            let pose = rapier3d::math::Pose { rotation, translation };
+            let pose = rapier3d::math::Pose {
+                rotation,
+                translation: translation.as_vec3(),
+            };
             if let Some(body) = state.bodies.get_mut(handle) {
                 if is_kinematic {
                     body.set_next_kinematic_position(pose);

@@ -126,11 +126,11 @@ struct App {
 impl App {
     fn new(link_mesh: MeshId, link_materials: Vec<MaterialId>) -> Self {
         let mut app = Self {
-            camera: Camera {
-                center: glam::Vec3::new(0.0, 0.0, -1.8),
-                distance: 8.0,
-                ..Camera::default()
-            },
+            camera: Camera::orbit(
+                glam::DVec3::new(0.0, 0.0, -1.8),
+                8.0,
+                Camera::default().orientation(),
+            ),
             controller: OrbitCameraController::viewport_primitives(),
             link_mesh,
             link_materials,
@@ -298,12 +298,12 @@ impl eframe::App for App {
             });
 
             ui.input(|i| {
-                self.controller
-                    .push_event(ViewportEvent::ModifiersChanged(Modifiers {
-                        alt: i.modifiers.alt,
-                        shift: i.modifiers.shift,
-                        ctrl: i.modifiers.command,
-                    }));
+                self.controller.push_event(ViewportEvent::ModifiersChanged(
+                    Modifiers::NONE
+                        .with_alt(i.modifiers.alt)
+                        .with_shift(i.modifiers.shift)
+                        .with_ctrl(i.modifiers.command),
+                ));
                 let local = i
                     .pointer
                     .interact_pos()
@@ -380,10 +380,10 @@ impl eframe::App for App {
                     let world = node.world_transform();
                     let model = snapshots
                         .interpolated(id, alpha)
-                        .map(glam::Mat4::from)
+                        .map(viewport_lib::Transform::from)
                         .unwrap_or(world);
                     let mut item = SceneRenderItem::new(self.link_mesh, node.material());
-                    item.model = model.to_cols_array_2d();
+                    item.model = model;
                     Some(item)
                 })
                 .collect();

@@ -19,7 +19,7 @@ fn frame_ctx() -> RuntimeFrameContext {
 }
 
 fn scene_position(scene: &Scene, id: viewport_lib::NodeId) -> glam::Vec3 {
-    scene.node(id).unwrap().world_transform().col(3).truncate()
+    scene.node(id).unwrap().world_transform().translation.as_vec3()
 }
 
 #[test]

@@ -159,11 +159,11 @@ impl App {
         char_controller.up = glam::Vec3::Z;
 
         let mut app = Self {
-            camera: Camera {
-                center: glam::Vec3::new(0.0, 0.0, 0.5),
-                distance: 12.0,
-                ..Camera::default()
-            },
+            camera: Camera::orbit(
+                glam::DVec3::new(0.0, 0.0, 0.5),
+                12.0,
+                Camera::default().orientation(),
+            ),
             controller_view: OrbitCameraController::viewport_primitives(),
             char_mesh,
             box_mesh,
@@ -370,11 +370,12 @@ impl eframe::App for App {
 
             ui.input(|i| {
                 self.controller_view
-                    .push_event(ViewportEvent::ModifiersChanged(Modifiers {
-                        alt: i.modifiers.alt,
-                        shift: i.modifiers.shift,
-                        ctrl: i.modifiers.command,
-                    }));
+                    .push_event(ViewportEvent::ModifiersChanged(
+                        Modifiers::NONE
+                            .with_alt(i.modifiers.alt)
+                            .with_shift(i.modifiers.shift)
+                            .with_ctrl(i.modifiers.command),
+                    ));
                 let local = i
                     .pointer
                     .interact_pos()
@@ -448,7 +449,7 @@ impl eframe::App for App {
             // transform, no interpolation since position is user-driven).
             if let Some(node) = self.scene.node(self.char_id) {
                 let mut item = SceneRenderItem::new(self.char_mesh, node.material());
-                item.model = node.world_transform().to_cols_array_2d();
+                item.model = node.world_transform();
                 items.push(item);
             }
 
@@ -456,13 +457,13 @@ impl eframe::App for App {
             for &id in &self.obstacle_ids {
                 if let Some(node) = self.scene.node(id) {
                     let mut item = SceneRenderItem::new(self.box_mesh, node.material());
-                    item.model = node.world_transform().to_cols_array_2d();
+                    item.model = node.world_transform();
                     items.push(item);
                 }
             }
             if let Some(node) = self.scene.node(self.floor_id) {
                 let mut item = SceneRenderItem::new(self.floor_mesh, node.material());
-                item.model = node.world_transform().to_cols_array_2d();
+                item.model = node.world_transform();
                 items.push(item);
             }
 

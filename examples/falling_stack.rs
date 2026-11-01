@@ -108,11 +108,11 @@ impl App {
         box_materials: Vec<MaterialId>,
     ) -> Self {
         let mut app = Self {
-            camera: Camera {
-                center: glam::Vec3::new(0.0, 0.0, 5.0),
-                distance: 22.0,
-                ..Camera::default()
-            },
+            camera: Camera::orbit(
+                glam::DVec3::new(0.0, 0.0, 5.0),
+                22.0,
+                Camera::default().orientation(),
+            ),
             controller: OrbitCameraController::viewport_primitives(),
             box_mesh,
             floor_mesh,
@@ -235,12 +235,12 @@ impl eframe::App for App {
             });
 
             ui.input(|i| {
-                self.controller
-                    .push_event(ViewportEvent::ModifiersChanged(Modifiers {
-                        alt: i.modifiers.alt,
-                        shift: i.modifiers.shift,
-                        ctrl: i.modifiers.command,
-                    }));
+                self.controller.push_event(ViewportEvent::ModifiersChanged(
+                    Modifiers::NONE
+                        .with_alt(i.modifiers.alt)
+                        .with_shift(i.modifiers.shift)
+                        .with_ctrl(i.modifiers.command),
+                ));
                 let local = i
                     .pointer
                     .interact_pos()
@@ -317,18 +317,18 @@ impl eframe::App for App {
                     let world = self.scene.node(id)?.world_transform();
                     let model = snapshots
                         .interpolated(id, alpha)
-                        .map(glam::Mat4::from)
+                        .map(viewport_lib::Transform::from)
                         .unwrap_or(world);
                     let mat = self.scene.node(id)?.material();
                     let mut item = SceneRenderItem::new(self.box_mesh, mat);
-                    item.model = model.to_cols_array_2d();
+                    item.model = model;
                     Some(item)
                 })
                 .collect();
 
             if let Some(node) = self.scene.node(self.floor_id) {
                 let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
-                floor_item.model = node.world_transform().to_cols_array_2d();
+                floor_item.model = node.world_transform();
                 items.push(floor_item);
             }
 

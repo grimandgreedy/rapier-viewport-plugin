@@ -138,11 +138,11 @@ impl App {
         floor_material: MaterialId,
     ) -> Self {
         let mut app = Self {
-            camera: Camera {
-                center: glam::Vec3::new(0.0, 0.0, 0.6),
-                distance: 14.0,
-                ..Camera::default()
-            },
+            camera: Camera::orbit(
+                glam::DVec3::new(0.0, 0.0, 0.6),
+                14.0,
+                Camera::default().orientation(),
+            ),
             controller: OrbitCameraController::viewport_primitives(),
             box_mesh,
             sphere_mesh,
@@ -244,8 +244,10 @@ impl App {
     }
 
     fn probe(&mut self) {
-        let eye = self.camera.eye_position();
-        let dir = (self.camera.center - eye).normalize_or_zero();
+        let eye = self.camera.eye().as_vec3();
+        let dir = (self.camera.target() - self.camera.eye())
+            .as_vec3()
+            .normalize_or_zero();
         if dir == glam::Vec3::ZERO {
             self.aimed = None;
             return;
@@ -360,12 +362,12 @@ impl eframe::App for App {
             let mut click_commit = false;
 
             ui.input(|i| {
-                self.controller
-                    .push_event(ViewportEvent::ModifiersChanged(Modifiers {
-                        alt: i.modifiers.alt,
-                        shift: i.modifiers.shift,
-                        ctrl: i.modifiers.command,
-                    }));
+                self.controller.push_event(ViewportEvent::ModifiersChanged(
+                    Modifiers::NONE
+                        .with_alt(i.modifiers.alt)
+                        .with_shift(i.modifiers.shift)
+                        .with_ctrl(i.modifiers.command),
+                ));
                 let local = i
                     .pointer
                     .interact_pos()
@@ -448,7 +450,7 @@ impl eframe::App for App {
                     let world = node.world_transform();
                     let model = snapshots
                         .interpolated(id, alpha)
-                        .map(glam::Mat4::from)
+                        .map(viewport_lib::Transform::from)
                         .unwrap_or(world);
                     let mesh_id = node.mesh_id()?;
                     let colour = if self.blackened.contains(&id) {
@@ -460,14 +462,14 @@ impl eframe::App for App {
                     };
                     let mut item = SceneRenderItem::new(mesh_id, self.plastic);
                     item.settings.colour = Some(Colour::from_linear_rgb_array(colour));
-                    item.model = model.to_cols_array_2d();
+                    item.model = model;
                     Some(item)
                 })
                 .collect();
 
             if let Some(node) = self.scene.node(self.floor_id) {
                 let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
-                floor_item.model = node.world_transform().to_cols_array_2d();
+                floor_item.model = node.world_transform();
                 items.push(floor_item);
             }
 
@@ -475,7 +477,7 @@ impl eframe::App for App {
             // landed on the highlighted body.
             if let Some(hit) = self.aimed {
                 let mut marker = SceneRenderItem::new(self.marker_mesh, self.plastic);
-                marker.model = glam::Mat4::from_translation(hit.point).to_cols_array_2d();
+                marker.model = glam::Mat4::from_translation(hit.point).into();
                 items.push(marker);
             }
 
