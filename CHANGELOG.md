@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0]
+
+- Update to viewport-lib 0.23. Node world transforms are now `f64`; the plugin
+  converts them to `f32` when it syncs kinematic and fixed bodies from the
+  scene.
+- The examples build against the 0.23 input API.
+
 ## [0.1.1]
 
 - Update to viewport-lib 0.20. The plugin is source-compatible with 0.20 and

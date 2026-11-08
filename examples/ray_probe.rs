@@ -34,6 +34,7 @@ use viewport_lib::{
     RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
     ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
+use viewport_lib::{InputOwnership, PointerOwnership};
 
 fn main() -> eframe::Result {
     eframe::run_native(
@@ -353,11 +354,15 @@ impl eframe::App for App {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
 
-            self.controller.begin_frame(ViewportContext {
-                hovered: response.hovered(),
-                focused: response.has_focus(),
-                viewport_size: [rect.width(), rect.height()],
-            });
+            let pointer = if response.hovered() || response.dragged() {
+                PointerOwnership::Owned
+            } else {
+                PointerOwnership::Elsewhere
+            };
+            self.controller.begin_frame(ViewportContext::new(
+                InputOwnership::pointer_only(pointer),
+                [rect.width(), rect.height()],
+            ));
 
             let mut click_commit = false;
 
