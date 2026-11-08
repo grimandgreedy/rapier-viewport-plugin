@@ -145,6 +145,14 @@ These rapier features work through the plugin (everything is reachable via `with
 
 The patterns above generalise: joint variants follow `joint_chain`, vehicle and character follow `character_controller`, continuous forces follow the `with_body_mut` pattern in `joint_chain`'s `kick()`.
 
+## Versions
+
+| rapier-viewport-plugin | viewport-lib |
+| --- | --- |
+| 0.2.0 | 0.23 |
+| 0.1.1 | 0.20 |
+| 0.1.0 | 0.19 |
+
 ## License
 
 `viewport-lib-wind` is a part of the viewport-lib ecosystem.
