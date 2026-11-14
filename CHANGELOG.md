@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.0]
+
+- Update to viewport-lib 0.24. The examples submit `MeshItem`, viewport-lib's new name for `SceneRenderItem`.
+
 ## [0.2.0]
 
 - Update to viewport-lib 0.23. Node world transforms are now `f64`; the plugin

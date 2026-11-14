@@ -149,6 +149,7 @@ The patterns above generalise: joint variants follow `joint_chain`, vehicle and 
 
 | rapier-viewport-plugin | viewport-lib |
 | --- | --- |
+| 0.3.0 | 0.24 |
 | 0.2.0 | 0.23 |
 | 0.1.1 | 0.20 |
 | 0.1.0 | 0.19 |
