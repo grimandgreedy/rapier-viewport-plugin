@@ -31,9 +31,9 @@ use rapier_viewport_plugin::{
     RapierPlugin,
 };
 use viewport_lib::{
-    BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
-    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    BackfacePolicy, ButtonState, Camera, CameraFrame, Colour, FixedTimestep, FrameData,
+    LightingSettings, Material, MaterialId, MeshId, MeshItem, Modifiers, MouseButton, NodeId,
+    OrbitCameraController, RuntimeFrameContext, Scene, SceneFrame, ScrollUnits, Selection,
     ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 use viewport_lib::{InputOwnership, PointerOwnership};
@@ -448,12 +448,12 @@ impl eframe::App for App {
             self.runtime
                 .step(&mut self.scene, &mut self.selection, &frame_ctx);
 
-            let mut items: Vec<SceneRenderItem> = Vec::new();
+            let mut items: Vec<MeshItem> = Vec::new();
 
             // Character (kinematic: render straight from the scene
             // transform, no interpolation since position is user-driven).
             if let Some(node) = self.scene.node(self.char_id) {
-                let mut item = SceneRenderItem::new(self.char_mesh, node.material());
+                let mut item = MeshItem::new(self.char_mesh, node.material());
                 item.model = node.world_transform();
                 items.push(item);
             }
@@ -461,13 +461,13 @@ impl eframe::App for App {
             // Obstacles + floor.
             for &id in &self.obstacle_ids {
                 if let Some(node) = self.scene.node(id) {
-                    let mut item = SceneRenderItem::new(self.box_mesh, node.material());
+                    let mut item = MeshItem::new(self.box_mesh, node.material());
                     item.model = node.world_transform();
                     items.push(item);
                 }
             }
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut item = SceneRenderItem::new(self.floor_mesh, node.material());
+                let mut item = MeshItem::new(self.floor_mesh, node.material());
                 item.model = node.world_transform();
                 items.push(item);
             }

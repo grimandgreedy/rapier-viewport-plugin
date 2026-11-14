@@ -29,9 +29,9 @@ use rapier_viewport_plugin::{
     RapierPlugin,
 };
 use viewport_lib::{
-    BackfacePolicy, ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings,
-    Colour, Material, MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController,
-    RuntimeFrameContext, Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection,
+    BackfacePolicy, ButtonState, Camera, CameraFrame, Colour, FixedTimestep, FrameData,
+    LightingSettings, Material, MaterialId, MeshId, MeshItem, Modifiers, MouseButton, NodeId,
+    OrbitCameraController, RuntimeFrameContext, Scene, SceneFrame, ScrollUnits, Selection,
     ViewportContext, ViewportEvent, ViewportRenderer, ViewportRuntime, primitives,
 };
 use viewport_lib::{InputOwnership, PointerOwnership};
@@ -446,7 +446,7 @@ impl eframe::App for App {
             let snapshots = self.runtime.snapshots();
             let aimed_node = self.aimed.map(|h| h.node);
 
-            let mut items: Vec<SceneRenderItem> = self
+            let mut items: Vec<MeshItem> = self
                 .body_ids
                 .iter()
                 .enumerate()
@@ -465,7 +465,7 @@ impl eframe::App for App {
                     } else {
                         self.body_colours[i]
                     };
-                    let mut item = SceneRenderItem::new(mesh_id, self.plastic);
+                    let mut item = MeshItem::new(mesh_id, self.plastic);
                     item.settings.colour = Some(Colour::from_linear_rgb_array(colour));
                     item.model = model;
                     Some(item)
@@ -473,7 +473,7 @@ impl eframe::App for App {
                 .collect();
 
             if let Some(node) = self.scene.node(self.floor_id) {
-                let mut floor_item = SceneRenderItem::new(self.floor_mesh, node.material());
+                let mut floor_item = MeshItem::new(self.floor_mesh, node.material());
                 floor_item.model = node.world_transform();
                 items.push(floor_item);
             }
@@ -481,7 +481,7 @@ impl eframe::App for App {
             // Small white marker at the hit point shows exactly where the ray
             // landed on the highlighted body.
             if let Some(hit) = self.aimed {
-                let mut marker = SceneRenderItem::new(self.marker_mesh, self.plastic);
+                let mut marker = MeshItem::new(self.marker_mesh, self.plastic);
                 marker.model = glam::Mat4::from_translation(hit.point).into();
                 items.push(marker);
             }

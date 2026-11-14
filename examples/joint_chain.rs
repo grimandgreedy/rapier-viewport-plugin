@@ -24,9 +24,9 @@ use rapier_viewport_plugin::{
     RapierPlugin,
 };
 use viewport_lib::{
-    ButtonState, Camera, CameraFrame, FixedTimestep, FrameData, LightingSettings, Colour, Material,
-    MaterialId, MeshId, Modifiers, MouseButton, NodeId, OrbitCameraController, RuntimeFrameContext,
-    Scene, SceneFrame, SceneRenderItem, ScrollUnits, Selection, ViewportContext, ViewportEvent,
+    ButtonState, Camera, CameraFrame, Colour, FixedTimestep, FrameData, LightingSettings, Material,
+    MaterialId, MeshId, MeshItem, Modifiers, MouseButton, NodeId, OrbitCameraController,
+    RuntimeFrameContext, Scene, SceneFrame, ScrollUnits, Selection, ViewportContext, ViewportEvent,
     ViewportRenderer, ViewportRuntime, primitives,
 };
 use viewport_lib::{InputOwnership, PointerOwnership};
@@ -377,7 +377,7 @@ impl eframe::App for App {
             let alpha = self.runtime.alpha();
             let snapshots = self.runtime.snapshots();
 
-            let items: Vec<SceneRenderItem> = self
+            let items: Vec<MeshItem> = self
                 .chain_ids
                 .iter()
                 .filter_map(|&id| {
@@ -387,7 +387,7 @@ impl eframe::App for App {
                         .interpolated(id, alpha)
                         .map(viewport_lib::Transform::from)
                         .unwrap_or(world);
-                    let mut item = SceneRenderItem::new(self.link_mesh, node.material());
+                    let mut item = MeshItem::new(self.link_mesh, node.material());
                     item.model = model;
                     Some(item)
                 })
